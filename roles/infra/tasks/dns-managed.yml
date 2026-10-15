@@ -1,0 +1,59 @@
+---
+# A dedicated CoreDNS container for this cluster: authoritative for the cluster zone, forwards everything else.
+- name: Deploy the project-managed CoreDNS
+  when: infra_state == 'present'
+  block:
+    - name: CoreDNS directory
+      ansible.builtin.file:
+        path: "{{ cluster_dir }}/coredns"
+        state: directory
+        mode: "0755"
+
+    - name: CoreDNS files
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ cluster_dir }}/coredns/{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - {src: db.zone.j2, dest: "db.{{ zone }}"}
+        - {src: Corefile.managed.j2, dest: Corefile}
+        - {src: coredns-compose.yaml.j2, dest: docker-compose.yaml}
+      loop_control:
+        label: "{{ item.dest }}"
+      register: coredns_files
+
+    - name: CoreDNS container is running
+      community.docker.docker_compose_v2:
+        project_src: "{{ cluster_dir }}/coredns"
+        state: present
+      register: coredns_up
+      when: not ansible_check_mode
+
+    - name: Restart CoreDNS to load the new config
+      community.docker.docker_compose_v2:
+        project_src: "{{ cluster_dir }}/coredns"
+        state: restarted
+      when: coredns_files.changed and not (coredns_up.changed | default(false))
+
+    - name: Verify DNS
+      ansible.builtin.include_tasks: dns-verify.yml
+      when: not ansible_check_mode
+
+- name: Remove the project-managed CoreDNS
+  when: infra_state == 'absent'
+  block:
+    - name: Stat the CoreDNS project
+      ansible.builtin.stat:
+        path: "{{ cluster_dir }}/coredns/docker-compose.yaml"
+      register: coredns_project
+
+    - name: Stop CoreDNS
+      community.docker.docker_compose_v2:
+        project_src: "{{ cluster_dir }}/coredns"
+        state: absent
+      when: coredns_project.stat.exists
+
+    - name: Remove the CoreDNS directory
+      ansible.builtin.file:
+        path: "{{ cluster_dir }}/coredns"
+        state: absent

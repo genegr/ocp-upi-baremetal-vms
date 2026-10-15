@@ -1,0 +1,17 @@
+---
+# Read-only health report: DNS, HAProxy pools, VMs, cluster. Fails if anything is FAIL.
+#   ansible-playbook playbooks/status.yml -e cluster=<name>
+- name: Cluster model
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - cluster_model
+
+- name: Status
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+  roles:
+    - status

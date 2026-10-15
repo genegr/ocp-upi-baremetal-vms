@@ -1,0 +1,39 @@
+---
+# The platform's OpenTofu module, one state per cluster (.state/clusters/<name>/terraform.tfstate), driven by
+# community.general.terraform. Check mode = plan only. Secrets reach the provider as TF_VAR_* via `environment`,
+# never as -var (the module prints its command line on failure).
+- name: Platform credentials
+  ansible.builtin.include_tasks: "{{ platform_dir }}/tasks/credentials.yml"
+
+- name: Current OpenTofu flags
+  ansible.builtin.set_fact:
+    tofu_flags_current: "{{ lookup('ansible.builtin.file', tfvars_file, errors='ignore') | default('{}', true) | from_json }}"
+
+- name: OpenTofu inputs
+  ansible.builtin.copy:
+    content: "{{ tofu_inputs | to_nice_json(indent=2) }}\n"
+    dest: "{{ tfvars_file }}"
+    mode: "0600"
+  vars:
+    tofu_inputs: >-
+      {{ {'bootstrap_enabled': true, 'attach_iso': true}
+         | combine(tofu_flags_current, vms_flags)
+         | combine({'cluster_json': cdir ~ '/cluster.json', 'iso_local_dir': cdir ~ '/iso'}) }}
+  check_mode: false
+
+- name: OpenTofu {{ 'plan' if ansible_check_mode else ('destroy' if vms_state == 'absent' else 'apply') }}
+  community.general.terraform:
+    project_path: "{{ platform_dir }}"
+    binary_path: "{{ tofu_binary }}"
+    state: "{{ vms_state }}"
+    force_init: true
+    backend_config:
+      path: "{{ cdir }}/terraform.tfstate"
+    variables_files: ["{{ tfvars_file }}"]
+    targets: "{{ vms_targets }}"
+  environment: "{{ platform_env | combine({'TF_DATA_DIR': cdir ~ '/.terraform'}) }}"
+  register: tofu_result
+
+- name: Platform post-apply steps
+  ansible.builtin.include_tasks: "{{ platform_dir }}/tasks/post_apply.yml"
+  when: vms_state == 'present' and not ansible_check_mode

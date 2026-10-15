@@ -1,0 +1,16 @@
+---
+# Approve the joining workers' CSRs (client, then serving) until every worker is Ready. Only CSRs that belong to
+# the workers listed in the config are approved (plugins/modules/ocp_csr_approve.py). Compact clusters: nothing to do.
+- name: Approve worker CSRs until the workers are Ready
+  ocp_csr_approve:
+    kubeconfig: "{{ kubeconfig }}"
+    nodes: "{{ c.nodes | selectattr('role', 'eq', 'worker') | map(attribute='hostname') | list }}"
+    wait: true
+    timeout: "{{ csr_timeout | default(3600) }}"
+  register: csr_result
+  when: c.nodes | selectattr('role', 'eq', 'worker') | list | length > 0
+
+- name: Workers Ready
+  ansible.builtin.debug:
+    msg: "approved {{ csr_result.approved | default([]) | length }} CSR(s); ready: {{ csr_result.ready | default([]) | join(', ') }}"
+  when: csr_result is not skipped

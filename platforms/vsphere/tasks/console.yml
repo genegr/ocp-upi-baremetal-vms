@@ -1,0 +1,17 @@
+---
+# Console screenshot of one node (troubleshooting): -e console_node=<name>. Saved under .state/clusters/<name>/.
+- name: Console screenshot of {{ console_node }}
+  community.vmware.vmware_guest_screenshot:
+    hostname: "{{ c.vsphere.server }}"
+    username: "{{ vsphere_user }}"
+    password: "{{ vsphere_password }}"
+    validate_certs: "{{ not c.vsphere.insecure }}"
+    datacenter: "{{ c.vsphere.datacenter }}"
+    folder: "/{{ c.vsphere.datacenter }}/vm/{{ c.vsphere.folder }}"
+    name: "{{ console_node }}"
+    local_path: "{{ cdir }}/{{ console_node }}-console.png"
+  register: screenshot
+
+- name: Screenshot location
+  ansible.builtin.debug:
+    msg: "{{ cdir }}/{{ console_node }}-console.png"

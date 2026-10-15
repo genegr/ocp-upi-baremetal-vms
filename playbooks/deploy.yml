@@ -1,0 +1,41 @@
+---
+# Full install of one cluster, phase by phase (each phase is a tag; every phase is idempotent):
+#   tools -> infra -> preflight -> ignition -> isos -> vms -> bootstrap -> workers -> complete (-> users)
+#   ansible-playbook playbooks/deploy.yml -e cluster=<name> [--tags <phase,...>] [--check]
+- name: Cluster model
+  hosts: localhost
+  gather_facts: false
+  tags: [always]
+  roles:
+    - cluster_model
+
+- name: Tools
+  hosts: localhost
+  gather_facts: false
+  tags: [tools]
+  roles:
+    - tools
+
+- name: DNS and HAProxy
+  hosts: infra_hosts
+  gather_facts: true
+  tags: [infra]
+  vars:
+    c: "{{ hostvars['localhost'].c }}"
+  roles:
+    - infra
+
+- name: Install
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+  roles:
+    - {role: preflight, tags: [preflight]}
+    - {role: ignition, tags: [ignition]}
+    - {role: isos, tags: [isos]}
+    - {role: vms, tags: [vms]}
+    - {role: bootstrap, tags: [bootstrap]}
+    - {role: csr, tags: [workers]}
+    - {role: install_complete, tags: [complete]}

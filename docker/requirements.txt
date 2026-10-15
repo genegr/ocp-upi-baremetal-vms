@@ -1,0 +1,9 @@
+# Python packages in the toolbox image. Pinned; releases published on or before 2026-09-30.
+ansible-core==2.21.4
+kubernetes==36.0.3       # kubernetes.core modules, ocp_csr_approve
+cryptography==50.0.2     # ocp_csr_approve (CSR subject check), community.crypto
+pyvmomi==9.1.1.0         # community.vmware modules (platform: vsphere)
+bcrypt==5.0.0            # htpasswd filter
+dnspython==2.8.0         # community.general.dig lookup
+jmespath==1.1.0
+netaddr==1.3.0

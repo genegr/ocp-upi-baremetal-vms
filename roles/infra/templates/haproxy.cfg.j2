@@ -1,0 +1,56 @@
+# {{ managed_header }}
+# OpenShift cluster {{ c.cluster.name }}: API, machine-config server and ingress (rendered from cluster.yaml)
+global
+  log stdout format raw local0 info
+
+defaults
+  mode                    tcp
+  log                     global
+  option                  dontlognull
+  option                  redispatch
+  retries                 3
+  timeout connect         10s
+  timeout client          1m
+  timeout server          1m
+  timeout check           10s
+  maxconn                 3000
+
+listen stats
+  mode http
+  bind *:{{ c.infra.haproxy.stats_port }}
+  stats enable
+  stats hide-version
+  stats refresh 30s
+  stats show-node
+  stats uri /stats
+  stats auth {{ c.infra.haproxy.stats_user }}:{{ c.infra.haproxy.stats_password }}
+
+listen api-server
+  bind *:6443
+  option  httpchk GET /readyz HTTP/1.0
+  option  log-health-checks
+  balance roundrobin
+{% for s in c.lb.api %}
+  server {{ s.name }} {{ s.ip }}:6443 weight 1 verify none check check-ssl inter 10s fall 2 rise 3{{ ' backup' if s.backup else '' }}
+{% endfor %}
+
+listen machine-config-server
+  bind *:22623
+  balance roundrobin
+{% for s in c.lb.api %}
+  server {{ s.name }} {{ s.ip }}:22623 check inter 1s{{ ' backup' if s.backup else '' }}
+{% endfor %}
+
+listen ingress-router-https
+  bind *:4443
+  balance source
+{% for s in c.lb.ingress %}
+  server {{ s.name }} {{ s.ip }}:443 check inter 1s
+{% endfor %}
+
+listen ingress-router-http
+  bind *:8080
+  balance source
+{% for s in c.lb.ingress %}
+  server {{ s.name }} {{ s.ip }}:80 check inter 1s
+{% endfor %}

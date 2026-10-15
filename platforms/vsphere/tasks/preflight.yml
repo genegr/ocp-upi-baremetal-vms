@@ -1,0 +1,60 @@
+---
+# Every vSphere object the OpenTofu module references exists. Appends to preflight_failures.
+- name: vSphere objects
+  module_defaults:
+    group/community.vmware.vmware: &auth
+      hostname: "{{ c.vsphere.server }}"
+      username: "{{ vsphere_user }}"
+      password: "{{ vsphere_password }}"
+      validate_certs: "{{ not c.vsphere.insecure }}"
+  block:
+    - name: Datacenter
+      community.vmware.vmware_datacenter_info:
+        datacenter: "{{ c.vsphere.datacenter }}"
+      register: vs_dc
+
+    - name: Cluster
+      community.vmware.vmware_cluster_info:
+        datacenter: "{{ c.vsphere.datacenter }}"
+        cluster_name: "{{ c.vsphere.cluster }}"
+      register: vs_cluster
+      failed_when: false
+
+    - name: Datastores
+      community.vmware.vmware_datastore_info:
+        datacenter: "{{ c.vsphere.datacenter }}"
+      register: vs_ds
+
+    - name: Distributed port groups
+      community.vmware.vmware_dvs_portgroup_info:
+        datacenter: "{{ c.vsphere.datacenter }}"
+      register: vs_dvpg
+
+    - name: Standard port groups
+      community.vmware.vmware_portgroup_info:
+        cluster_name: "{{ c.vsphere.cluster }}"
+      register: vs_pg
+      failed_when: false
+
+    - name: VM folders
+      community.vmware.vmware_folder_info:
+        datacenter: "{{ c.vsphere.datacenter }}"
+      register: vs_folders
+
+    - name: Record what is missing
+      ansible.builtin.set_fact:
+        preflight_failures: >-
+          {{ preflight_failures
+             + ([] if vs_dc.datacenter_info | length > 0 else ['vSphere datacenter ' ~ c.vsphere.datacenter])
+             + ([] if (vs_cluster.clusters | default({})) | length > 0 else ['vSphere cluster ' ~ c.vsphere.cluster])
+             + (needed_ds | difference(vs_ds.datastores | map(attribute='name')) | map('regex_replace', '^', 'datastore ') | list)
+             + (needed_nets | difference(known_nets) | map('regex_replace', '^', 'port group ') | list)
+             + ([] if c.vsphere.create_folder or ('/' ~ c.vsphere.datacenter ~ '/vm/' ~ c.vsphere.folder) in folder_paths
+                else ['VM folder ' ~ c.vsphere.folder]) }}
+      vars:
+        needed_ds: "{{ [c.vsphere.datastore, c.vsphere.iso_datastore] | unique }}"
+        needed_nets: "{{ c.nodes | map(attribute='nics') | flatten | map(attribute='network') | unique }}"
+        known_nets: >-
+          {{ (vs_dvpg.dvs_portgroup_info | default({})).values() | flatten | map(attribute='portgroup_name') | list
+             + (vs_pg.hosts_portgroup_info | default({})).values() | flatten | map(attribute='portgroup') | list }}
+        folder_paths: "{{ vs_folders.flat_folder_info | default([]) | map(attribute='path') | list }}"

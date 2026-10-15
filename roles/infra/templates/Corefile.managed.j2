@@ -1,0 +1,13 @@
+# {{ managed_header }}
+{{ zone }} {
+    file /etc/coredns/db.{{ zone }}
+    log
+    errors
+}
+
+. {
+    forward . {{ c.infra.dns.forwarders | join(' ') }}
+    cache 30
+    log
+    errors
+}

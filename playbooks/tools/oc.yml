@@ -1,0 +1,24 @@
+---
+# Run oc (the cluster's pinned release) against a cluster, from the toolbox:
+#   ansible-playbook playbooks/tools/oc.yml -e cluster=<name> -e "oc_args='get nodes -o wide'"
+# A convenience for humans, like vsphere-rke's tools/govc.yml: read-only use is the intent.
+- name: Cluster model
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - cluster_model
+
+- name: Run oc
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: oc {{ oc_args }}
+      ansible.builtin.command:
+        argv: "{{ [ocp_bin_dir ~ '/oc', '--kubeconfig', kubeconfig] + (oc_args | split) }}"
+      register: oc_out
+      changed_when: false
+      check_mode: false
+
+    - name: Output
+      ansible.builtin.debug:
+        msg: "{{ oc_out.stdout_lines }}"

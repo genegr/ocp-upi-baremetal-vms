@@ -1,0 +1,16 @@
+---
+# After OpenTofu created/updated the VMs: boot order disk, then CD-ROM. The blank disk is skipped on the first boot,
+# so the ISO installs RHCOS; after the installer's reboot the disk boots and the ISO can't reinstall.
+# The provider has no boot-order setting; this runs seconds after power-on, minutes before the installer reboots.
+- name: Boot order disk, then CD-ROM
+  community.vmware.vmware_guest_boot_manager:
+    hostname: "{{ c.vsphere.server }}"
+    username: "{{ vsphere_user }}"
+    password: "{{ vsphere_password }}"
+    validate_certs: "{{ not c.vsphere.insecure }}"
+    uuid: "{{ item.value.uuid }}"
+    boot_order: [disk, cdrom]
+  loop: "{{ tofu_result.outputs.nodes.value | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: tofu_result.outputs is defined and 'nodes' in tofu_result.outputs

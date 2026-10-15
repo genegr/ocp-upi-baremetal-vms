@@ -1,0 +1,29 @@
+---
+# Power state and nested-virtualization flag of every node VM.
+# Sets vm_state: {<node>: {"power": "on"|"off", "nested": true|false}}; nodes without a VM are absent from it.
+- name: VM properties
+  community.vmware.vmware_guest_info:
+    hostname: "{{ c.vsphere.server }}"
+    username: "{{ vsphere_user }}"
+    password: "{{ vsphere_password }}"
+    validate_certs: "{{ not c.vsphere.insecure }}"
+    datacenter: "{{ c.vsphere.datacenter }}"
+    folder: "/{{ c.vsphere.datacenter }}/vm/{{ c.vsphere.folder }}"
+    name: "{{ item.name }}"
+    schema: vsphere
+    properties: [runtime.powerState, config.nestedHVEnabled]
+  loop: "{{ c.nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: vs_vms
+  failed_when: false
+
+- name: VM state
+  ansible.builtin.set_fact:
+    vm_state: >-
+      {{ vm_state | default({}) | combine({item.item.name: {
+           'power': 'on' if item.instance.runtime.powerState == 'poweredOn' else 'off',
+           'nested': item.instance.config.nestedHVEnabled | bool}}) }}
+  loop: "{{ vs_vms.results | selectattr('instance', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.item.name }}"

@@ -1,0 +1,15 @@
+---
+# Apply VM changes that need a power cycle (memory, CPUs, nested virtualization) one node at a time.
+#   -e rolling_nodes=[...]   nodes to consider (default: workers, then masters)
+#   -e rolling_yes=true      don't ask before each node
+- name: Platform credentials
+  ansible.builtin.include_tasks: "{{ platform_dir }}/tasks/credentials.yml"
+
+- name: One node at a time
+  ansible.builtin.include_tasks: node.yml
+  loop: >-
+    {{ rolling_nodes | default(
+         (c.nodes | selectattr('role', 'eq', 'worker') | map(attribute='name') | list)
+         + (c.nodes | selectattr('role', 'eq', 'master') | map(attribute='name') | list)) }}
+  loop_control:
+    loop_var: node_name

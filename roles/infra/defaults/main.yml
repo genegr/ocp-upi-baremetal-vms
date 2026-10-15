@@ -1,0 +1,3 @@
+---
+# present = deploy/update, absent = remove this cluster's zone and HAProxy
+infra_state: present

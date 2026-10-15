@@ -1,0 +1,117 @@
+# Copy to clusters/<name>.yaml (gitignored; the file is named after cluster.name) and adapt. The playbooks
+# (-e cluster=<name>) read it through the cluster_model filter (plugins/filter/cluster_model.py), which validates it
+# and derives the rest (FQDNs, NIC MACs, LB backends, DNS records). Secrets don't go here: they live in
+# clusters/vault.yml (see vault.yml.example). Addresses below use the RFC 5737 documentation range and example.com.
+
+# Virtualization platform that hosts the "bare metal" VMs. Its settings go in the section of the same name below
+# (implemented: vsphere; see platforms/README.md to add one, e.g. nutanix or proxmox).
+platform: vsphere
+
+cluster:
+  name: ocp4                          # cluster domain = <name>.<base_domain>
+  base_domain: example.com
+  ocp_channel: stable-4.22            # the tools phase resolves it once and pins it in .state/clusters/<name>/ocp-version
+  ocp_version: ""                     # or pin an exact release, e.g. 4.22.17
+  masters_schedulable: auto           # auto: masters run workloads only when there are no workers (compact cluster)
+  hostname_style: fqdn                # node names: fqdn (master0.ocp4.example.com) or short (master0)
+  install_disk: /dev/sda              # boot disk as RHCOS sees it (vSphere pvscsi: /dev/sda; virtio: /dev/vda)
+  # The pull secret comes from clusters/vault.yml (vault_pull_secret). The project key .state/ssh/id_ed25519 is
+  # always authorized for core@ on the nodes; add another one with ssh_pubkey_file (a path inside the toolbox).
+  # ssh_pubkey_file: ""
+  # kubeconfig_copy: ""               # optional extra copy of the admin kubeconfig (a path inside the toolbox)
+  # network_type: OVNKubernetes
+  # cluster_network: 10.128.0.0/14
+  # host_prefix: 23
+  # service_network: 172.30.0.0/16
+  # install_config_extra: {}          # deep-merged into install-config.yaml (proxy, additionalTrustBundle, ...)
+
+network:                              # machine network; every node gets a static IP on it at provisioning time
+  cidr: 192.0.2.0/24
+  gateway: 192.0.2.1
+  dns_servers: [192.0.2.2]
+  # dns_search: [example.com]         # default: base_domain
+  api_vip: 192.0.2.3                  # api + api-int -> HAProxy (6443, 22623)
+  ingress_vip: 192.0.2.4              # *.apps -> HAProxy (80, 443)
+
+# Each node's MAC is fixed so its network keyfile can match it. The platform may restrict MACs: vSphere only
+# accepts its manual range 00:50:56:00:00:00-00:50:56:3f:ff:ff (the cluster_model filter checks it).
+# Extra NICs (roles.*.extra_networks) reuse the MAC with the 4th octet + 1, + 2, ...
+nodes:
+  - {name: bootstrap, role: bootstrap, ip: 192.0.2.50, mac: "00:50:56:01:00:50"}
+  - {name: master0,   role: master,    ip: 192.0.2.51, mac: "00:50:56:01:00:51"}
+  - {name: master1,   role: master,    ip: 192.0.2.52, mac: "00:50:56:01:00:52"}
+  - {name: master2,   role: master,    ip: 192.0.2.53, mac: "00:50:56:01:00:53"}
+  - {name: worker0,   role: worker,    ip: 192.0.2.54, mac: "00:50:56:01:00:54"}
+  - {name: worker1,   role: worker,    ip: 192.0.2.55, mac: "00:50:56:01:00:55"}
+  - {name: worker2,   role: worker,    ip: 192.0.2.56, mac: "00:50:56:01:00:56"}
+  # Compact 3-node cluster: drop the workers. The masters then also run routers and apps, so size them for both
+  # (e.g. roles.master: {cpus: 16, memory_mb: 32768}). The bootstrap VM is still needed during the install only.
+  # any role key can be overridden per node, e.g. {name: worker3, ..., memory_mb: 65536, nested_virt: true}
+
+roles:                                # per-role sizing; any key can also be overridden per node
+  bootstrap: {cpus: 4, memory_mb: 16384, disk_gb: 120}
+  master:    {cpus: 4, memory_mb: 16384, disk_gb: 120}
+  worker:
+    cpus: 8
+    memory_mb: 32768
+    disk_gb: 120
+    extra_networks: []                # e.g. ["Storage A", "Storage B"]: extra NICs, left unconfigured (set up later, e.g. NMState)
+    # Expose hardware virtualization (VT-x/AMD-V) to the workers. Only needed for OpenShift Virtualization
+    # (KubeVirt); leave it off for a regular cluster. With it on, plan for more memory too (64 GB+ per worker).
+    nested_virt: false
+
+# --- platform: vsphere -----------------------------------------------------------------------------------------
+vsphere:
+  server: vcenter.example.com
+  insecure: true                      # self-signed vCenter certificate
+  datacenter: Datacenter
+  cluster: Cluster
+  esxi_host: ""                       # optional: pin all VMs to one host (empty = DRS placement)
+  resource_pool: ""                   # optional: resource pool path (empty = the cluster's root pool)
+  datastore: vm-datastore             # VM disks
+  iso_datastore: iso-datastore        # node ISOs
+  iso_dir: ocp4                       # folder on the ISO datastore
+  folder: ocp4                        # VM folder, relative to the datacenter's VM root
+  create_folder: true                 # false if the folder already exists
+  network: "VM Network"               # port group for the machine network
+  guest_id: rhel9_64Guest
+  firmware: efi
+  thin_disks: true
+
+# DNS + HAProxy containers on a Docker host that owns dns_servers[0] and both VIPs (playbooks/infra.yml, or the
+# infra phase of deploy.yml). The toolbox reaches it over SSH with the project key .state/ssh/id_ed25519.
+infra:
+  enabled: true
+  host: 192.0.2.2                     # SSH target for Ansible
+  user: ubuntu                        # must be able to run docker
+  base_dir: ~/containers              # project-owned containers go to <base_dir>/<cluster name>/
+  dns:
+    mode: managed                     # managed: own CoreDNS container | shared: add a zone to an existing CoreDNS
+    forwarders: [1.1.1.1]             # managed mode: upstream for everything outside the cluster zone
+    # listen: [192.0.2.2]             # managed mode: default dns_servers
+    # image: coredns/coredns:1.12.0
+    # shared:                         # shared mode: existing CoreDNS compose project
+    #   config_dir: ~/containers/coredns/config   # host dir mounted into the container, holds Corefile
+    #   container_config_dir: /etc/coredns        # same dir inside the container
+    #   container: coredns
+    #   legacy_zone_file: db.example.com          # optional: comment out this cluster's old records there
+    # verify_names: [www.redhat.com]  # names that must still resolve after a DNS change
+  extra_records: []                   # extra A records in the cluster zone, e.g. [{name: worker3, ip: 192.0.2.57}]
+  haproxy:
+    stats_user: admin
+    stats_password: change-me
+    # stats_port: 9000
+    # image: haproxy:3.2
+    # replace_compose_dir: ~/containers/haproxy-old  # one-time cutover: stop this compose project first
+
+# Users: OpenShift's HTPasswd identity provider, set up at the end of the install (and by playbooks/users.yml
+# whenever the user list changes). Users, passwords and roles live in a separate gitignored list
+# (start from clusters/htpasswd.example.yml); vault-encrypt the passwords (ansible-vault encrypt_string).
+identity:
+  htpasswd:
+    enabled: false
+    users_file: ""                    # default: next to this file, <name>.htpasswd.yml (clusters/<name>.htpasswd.yml)
+
+tools:
+  tofu_version: 1.12.6
+  coreos_installer_image: quay.io/coreos/coreos-installer:release

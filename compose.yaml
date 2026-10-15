@@ -1,0 +1,24 @@
+# Run every tool through this service, e.g.:
+#   docker compose run --rm toolbox ansible-playbook playbooks/deploy.yml -e cluster=<name>
+services:
+  toolbox:
+    build:
+      context: docker
+      # Lab DNS servers can sit inside Docker's default bridge 172.17.0.0/16; bridged containers then can't resolve
+      # names, so build and run on the host network.
+      network: host
+      args:
+        TOOLBOX_UID: "${UID:-1000}"
+        TOOLBOX_GID: "${GID:-1000}"
+    image: ocp-upi-toolbox:1
+    network_mode: host
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /work
+    volumes:
+      - ./:/work
+    environment:
+      HOME: /work/.state/home
+      ANSIBLE_CONFIG: /work/ansible.cfg
+      TF_IN_AUTOMATION: "1"
+    stdin_open: true
+    tty: true

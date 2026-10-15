@@ -1,0 +1,35 @@
+---
+- name: Docker is reachable on the infra host
+  community.docker.docker_host_info:
+  register: docker_host
+
+- name: Load balancer VIPs are configured on the Docker host
+  ansible.builtin.assert:
+    that: item in ansible_facts.all_ipv4_addresses
+    fail_msg: >-
+      {{ item }} is not configured on {{ inventory_hostname }}. Add it as a secondary address on the interface
+      facing {{ c.network.cidr }} (e.g. netplan `addresses: [{{ item }}/{{ c.network.prefix }}]`) and rerun.
+    quiet: true
+  loop: "{{ c.lb.vips }}"
+  when: infra_state == 'present'
+
+- name: DNS listen addresses are configured on the Docker host
+  ansible.builtin.assert:
+    that: item in ansible_facts.all_ipv4_addresses
+    fail_msg: "{{ item }} (infra.dns.listen) is not configured on {{ inventory_hostname }}"
+    quiet: true
+  loop: "{{ c.infra.dns.listen }}"
+  when: infra_state == 'present' and c.infra.dns.mode == 'managed'
+
+- name: Shared CoreDNS Corefile exists
+  ansible.builtin.stat:
+    path: "{{ c.infra.dns.shared.config_dir | regex_replace('^~', ansible_facts.env.HOME) }}/Corefile"
+  register: shared_corefile
+  when: c.infra.dns.mode == 'shared'
+
+- name: Shared CoreDNS Corefile is present
+  ansible.builtin.assert:
+    that: shared_corefile.stat.exists
+    fail_msg: "no Corefile in infra.dns.shared.config_dir ({{ c.infra.dns.shared.config_dir }})"
+    quiet: true
+  when: c.infra.dns.mode == 'shared'

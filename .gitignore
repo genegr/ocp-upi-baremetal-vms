@@ -1,0 +1,18 @@
+# Runtime state on the jump box: vault password, SSH key, tool cache, per-cluster OpenTofu state, install dirs
+# (kubeconfig, kubeadmin password), ISOs, logs
+.state/
+
+# Local configuration and secrets: cluster configs, user lists and the vault stay on the jump box
+cluster.yaml
+cluster.htpasswd.yml
+clusters/*
+!clusters/README.md
+!clusters/vault.yml.example
+!clusters/htpasswd.example.yml
+.sync.env
+
+# OpenTofu working files
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log

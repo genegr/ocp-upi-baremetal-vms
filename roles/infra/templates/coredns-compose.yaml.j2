@@ -1,0 +1,15 @@
+# {{ managed_header }}
+name: {{ c.cluster.name }}-coredns
+services:
+  coredns:
+    image: {{ c.infra.dns.image }}
+    container_name: {{ c.cluster.name }}-coredns
+    restart: unless-stopped
+    command: ["-conf", "/etc/coredns/Corefile"]
+    volumes:
+      - ./:/etc/coredns:ro
+    ports:
+{% for ip in c.infra.dns.listen %}
+      - "{{ ip }}:53:53/udp"
+      - "{{ ip }}:53:53/tcp"
+{% endfor %}

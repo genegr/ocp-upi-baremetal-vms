@@ -1,0 +1,105 @@
+---
+# Load the selected cluster config, validate it and derive the model `c` (plugins/filter/cluster_model.py).
+# Selection: -e cluster=<name> (clusters/<name>.yaml), -e cluster_config=<path>, or a lone ./cluster.yaml.
+- name: Repository root
+  ansible.builtin.set_fact:
+    repo_root: "{{ inventory_dir | dirname }}"
+
+- name: Pick the cluster config
+  ansible.builtin.set_fact:
+    cluster_config_file: >-
+      {{ cluster_config if cluster_config is defined
+         else repo_root ~ '/clusters/' ~ cluster ~ '.yaml' if cluster is defined
+         else repo_root ~ '/cluster.yaml' }}
+
+- name: Look for the cluster config
+  ansible.builtin.stat:
+    path: "{{ cluster_config_file }}"
+  register: cluster_config_stat
+
+- name: List the available cluster configs
+  ansible.builtin.find:
+    paths: "{{ repo_root }}/clusters"
+    patterns: "*.yaml"
+  register: available_configs
+  when: not cluster_config_stat.stat.exists
+
+- name: The cluster config exists
+  ansible.builtin.assert:
+    that: cluster_config_stat.stat.exists
+    fail_msg: >-
+      No cluster config at {{ cluster_config_file }}. Pass -e cluster=<name>; available:
+      {{ available_configs.files | default([]) | map(attribute='path') | map('basename')
+         | map('regex_replace', '\.yaml$', '') | join(', ') or 'none' }}
+    quiet: true
+
+- name: Read the cluster config
+  ansible.builtin.include_vars:
+    file: "{{ cluster_config_file }}"
+    name: raw_cluster_config
+
+- name: Validate the config and derive the cluster model
+  ansible.builtin.set_fact:
+    c: "{{ raw_cluster_config | cluster_model(cluster_config_file) }}"
+
+- name: The config file is named after its cluster
+  ansible.builtin.assert:
+    that: cluster is not defined or cluster == c.cluster.name
+    fail_msg: "{{ cluster_config_file }} defines cluster '{{ c.cluster.name }}', not '{{ cluster }}'"
+    quiet: true
+
+# Runtime state, all under the gitignored .state/: per cluster in .state/clusters/<name>/, shared tools and caches.
+- name: Paths
+  ansible.builtin.set_fact:
+    state_root: "{{ repo_root }}/.state"
+    cdir: "{{ repo_root }}/.state/clusters/{{ c.cluster.name }}"
+    install_dir: "{{ repo_root }}/.state/clusters/{{ c.cluster.name }}/install"
+    tfvars_file: "{{ repo_root }}/.state/clusters/{{ c.cluster.name }}/tofu.tfvars.json"
+    kubeconfig: "{{ repo_root }}/.state/clusters/{{ c.cluster.name }}/install/auth/kubeconfig"
+    ssh_key: "{{ repo_root }}/.state/ssh/id_ed25519"
+    platform_dir: "{{ repo_root }}/platforms/{{ c.platform }}"
+
+- name: Cluster state directory
+  ansible.builtin.file:
+    path: "{{ cdir }}"
+    state: directory
+    mode: "0700"
+
+- name: Rendered model for OpenTofu
+  ansible.builtin.copy:
+    content: "{{ c | to_nice_json(indent=2) }}\n"
+    dest: "{{ cdir }}/cluster.json"
+    mode: "0600"
+
+- name: Pinned OpenShift release
+  ansible.builtin.stat:
+    path: "{{ cdir }}/ocp-version"
+  register: ocp_version_file
+
+- name: Tools for the pinned release
+  ansible.builtin.set_fact:
+    ocp_version: "{{ lookup('ansible.builtin.file', cdir ~ '/ocp-version') | trim }}"
+    ocp_bin_dir: "{{ state_root }}/bin/{{ lookup('ansible.builtin.file', cdir ~ '/ocp-version') | trim }}"
+  when: ocp_version_file.stat.exists
+
+# Secrets: clusters/vault.yml (Ansible Vault; vault_vsphere_user, vault_vsphere_password, vault_pull_secret, ...).
+- name: Look for the vault
+  ansible.builtin.stat:
+    path: "{{ repo_root }}/clusters/vault.yml"
+  register: vault_file
+
+- name: Load the vault
+  ansible.builtin.include_vars:
+    file: "{{ repo_root }}/clusters/vault.yml"
+  when: vault_file.stat.exists
+  no_log: true
+
+- name: Register the infra host (DNS + HAProxy)
+  ansible.builtin.add_host:
+    name: infra
+    ansible_host: "{{ c.infra.host }}"
+    ansible_user: "{{ c.infra.user }}"
+    ansible_ssh_private_key_file: "{{ ssh_key }}"
+    groups: [infra_hosts]
+  when: c.infra.enabled
+  changed_when: false

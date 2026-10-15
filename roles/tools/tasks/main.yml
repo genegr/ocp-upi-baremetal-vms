@@ -1,0 +1,103 @@
+---
+# Per-cluster tool chain: pin the OpenShift release, fetch openshift-install/oc for it into .state/bin/<release>/,
+# fetch the matching RHCOS live ISO into .state/cache/, and make sure the project SSH key exists.
+- name: State directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0700"
+  loop:
+    - "{{ state_root }}/home"
+    - "{{ state_root }}/ssh"
+    - "{{ state_root }}/cache"
+    - "{{ state_root }}/bin"
+
+- name: Project SSH key (infra host access; added to the nodes' install-config)
+  community.crypto.openssh_keypair:
+    path: "{{ ssh_key }}"
+    type: ed25519
+    comment: ocp-pxe toolbox
+
+# --- release pin ---------------------------------------------------------------------------------------------
+- name: Resolve the release channel
+  ansible.builtin.uri:
+    url: "{{ tools_mirror }}/{{ c.cluster.ocp_channel }}/release.txt"
+    return_content: true
+  register: channel_release
+  when: c.cluster.ocp_version | length == 0 and (tools_repin | bool or not ocp_version_file.stat.exists)
+
+- name: Pin the release
+  ansible.builtin.copy:
+    content: "{{ pinned }}\n"
+    dest: "{{ cdir }}/ocp-version"
+    mode: "0600"
+  vars:
+    pinned: >-
+      {{ c.cluster.ocp_version if c.cluster.ocp_version | length > 0
+         else channel_release.content | regex_search('(?m)^Name:\s+(\S+)', '\1') | first
+         if channel_release.content is defined
+         else ocp_version }}
+
+- name: Release and tool paths
+  ansible.builtin.set_fact:
+    ocp_version: "{{ lookup('ansible.builtin.file', cdir ~ '/ocp-version') | trim }}"
+    ocp_bin_dir: "{{ state_root }}/bin/{{ lookup('ansible.builtin.file', cdir ~ '/ocp-version') | trim }}"
+
+# --- openshift-install + oc ----------------------------------------------------------------------------------
+- name: Release directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0700"
+  loop: ["{{ ocp_bin_dir }}", "{{ state_root }}/cache/{{ ocp_version }}"]
+
+- name: Download openshift-install and oc (checksum-verified)
+  ansible.builtin.get_url:
+    url: "{{ tools_mirror }}/{{ ocp_version }}/{{ item }}"
+    dest: "{{ state_root }}/cache/{{ ocp_version }}/{{ item }}"
+    checksum: "sha256:{{ tools_mirror }}/{{ ocp_version }}/sha256sum.txt"
+    mode: "0600"
+  loop:
+    - "openshift-install-linux-{{ ocp_version }}.tar.gz"
+    - "openshift-client-linux-{{ ocp_version }}.tar.gz"
+
+- name: Unpack openshift-install
+  ansible.builtin.unarchive:
+    src: "{{ state_root }}/cache/{{ ocp_version }}/openshift-install-linux-{{ ocp_version }}.tar.gz"
+    dest: "{{ ocp_bin_dir }}"
+    remote_src: true
+    include: [openshift-install]
+    creates: "{{ ocp_bin_dir }}/openshift-install"
+
+- name: Unpack oc and kubectl
+  ansible.builtin.unarchive:
+    src: "{{ state_root }}/cache/{{ ocp_version }}/openshift-client-linux-{{ ocp_version }}.tar.gz"
+    dest: "{{ ocp_bin_dir }}"
+    remote_src: true
+    include: [oc, kubectl]
+    creates: "{{ ocp_bin_dir }}/oc"
+
+# --- RHCOS live ISO (the one this installer was built with) ----------------------------------------------------
+# openshift-install is a binary with no Ansible module; this only reads its embedded stream metadata.
+- name: RHCOS stream metadata from the installer
+  ansible.builtin.command: "{{ ocp_bin_dir }}/openshift-install coreos print-stream-json"
+  register: rhcos_stream
+  changed_when: false
+  check_mode: false
+
+- name: RHCOS live ISO
+  ansible.builtin.set_fact:
+    rhcos_iso: "{{ (rhcos_stream.stdout | from_json).architectures[c.cluster.architecture].artifacts.metal.formats.iso.disk }}"
+
+- name: Download the RHCOS live ISO (checksum-verified)
+  ansible.builtin.get_url:
+    url: "{{ rhcos_iso.location }}"
+    dest: "{{ state_root }}/cache/{{ rhcos_iso.location | basename }}"
+    checksum: "sha256:{{ rhcos_iso.sha256 }}"
+    mode: "0600"
+
+- name: This cluster's base ISO
+  ansible.builtin.file:
+    src: "{{ state_root }}/cache/{{ rhcos_iso.location | basename }}"
+    dest: "{{ cdir }}/rhcos-live.iso"
+    state: link

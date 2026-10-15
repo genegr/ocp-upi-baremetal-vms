@@ -1,0 +1,107 @@
+---
+# Add the cluster's zone to an existing CoreDNS that other environments also use.
+# Only files/blocks owned by this cluster are touched; the CoreDNS container is restarted
+# (a ~1 s blip for every zone it serves) only when something actually changed.
+- name: Shared CoreDNS paths
+  ansible.builtin.set_fact:
+    shared_dir: "{{ c.infra.dns.shared.config_dir | regex_replace('^~', ansible_facts.env.HOME) }}"
+    legacy_zone: "{{ c.infra.dns.shared.legacy_zone_file }}"
+
+- name: Deploy the cluster zone into the shared CoreDNS
+  when: infra_state == 'present'
+  block:
+    - name: Zone file for {{ zone }}
+      ansible.builtin.template:
+        src: db.zone.j2
+        dest: "{{ shared_dir }}/db.{{ zone }}"
+        mode: "0644"
+        backup: true
+      register: zone_file
+
+    - name: Corefile server block for {{ zone }}
+      ansible.builtin.blockinfile:
+        path: "{{ shared_dir }}/Corefile"
+        marker: "# {mark} ocp-upi {{ zone }}"
+        block: "{{ lookup('ansible.builtin.template', 'Corefile.block.j2') }}"
+        backup: true
+      register: corefile
+
+    # The more specific zone above wins in CoreDNS, so these records are dead; comment them out so
+    # every name for this cluster lives in one file.
+    - name: Comment out the cluster's old records in the parent zone file
+      ansible.builtin.replace:
+        path: "{{ (legacy_zone is abs) | ternary(legacy_zone, shared_dir ~ '/' ~ legacy_zone) }}"
+        regexp: '^(?!;)((?:\S+\.)?{{ c.cluster.name | regex_escape }}\s.*)$'
+        replace: '; moved to db.{{ zone }} by ocp-upi: \1'
+        backup: true
+      register: legacy
+      when: legacy_zone | length > 0
+
+    - name: Restart the shared CoreDNS
+      community.docker.docker_container:
+        name: "{{ c.infra.dns.shared.container }}"
+        state: started
+        restart: true
+      when: zone_file.changed or corefile.changed or (legacy.changed | default(false))
+
+    - name: Verify DNS
+      ansible.builtin.include_tasks: dns-verify.yml
+      when: not ansible_check_mode
+
+  rescue:
+    - name: Restore the previous files
+      ansible.builtin.copy:
+        src: "{{ item.backup }}"
+        dest: "{{ item.path }}"
+        remote_src: true
+        mode: preserve
+      when: item.backup | length > 0
+      loop:
+        - path: "{{ shared_dir }}/db.{{ zone }}"
+          backup: "{{ (zone_file | default({})).backup_file | default('') }}"
+        - path: "{{ shared_dir }}/Corefile"
+          backup: "{{ (corefile | default({})).backup | default((corefile | default({})).backup_file | default('')) }}"
+        - path: "{{ (legacy_zone is abs) | ternary(legacy_zone, shared_dir ~ '/' ~ legacy_zone) }}"
+          backup: "{{ (legacy | default({})).backup_file | default((legacy | default({})).backup | default('')) }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Remove the zone file if it did not exist before
+      ansible.builtin.file:
+        path: "{{ shared_dir }}/db.{{ zone }}"
+        state: absent
+      when: ((zone_file | default({})).changed | default(false)) and ((zone_file | default({})).backup_file is not defined)
+
+    - name: Restart the shared CoreDNS with the restored config
+      community.docker.docker_container:
+        name: "{{ c.infra.dns.shared.container }}"
+        state: started
+        restart: true
+
+    - name: Report the rollback
+      ansible.builtin.fail:
+        msg: "DNS deployment failed and was rolled back: {{ ansible_failed_result.msg | default(ansible_failed_result) }}"
+
+- name: Remove the cluster zone from the shared CoreDNS
+  when: infra_state == 'absent'
+  block:
+    - name: Remove the Corefile server block
+      ansible.builtin.blockinfile:
+        path: "{{ shared_dir }}/Corefile"
+        marker: "# {mark} ocp-upi {{ zone }}"
+        state: absent
+        backup: true
+      register: corefile_rm
+
+    - name: Remove the zone file
+      ansible.builtin.file:
+        path: "{{ shared_dir }}/db.{{ zone }}"
+        state: absent
+      register: zone_rm
+
+    - name: Restart the shared CoreDNS
+      community.docker.docker_container:
+        name: "{{ c.infra.dns.shared.container }}"
+        state: started
+        restart: true
+      when: corefile_rm.changed or zone_rm.changed

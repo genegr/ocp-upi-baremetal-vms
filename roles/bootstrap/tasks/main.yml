@@ -1,0 +1,37 @@
+---
+# Wait for the bootstrap to finish (what `openshift-install wait-for bootstrap-complete` checks, read straight from
+# the API), then remove the bootstrap VM. The API refuses connections at first, so errors just mean "retry".
+- name: Bootstrap complete (kube-system/bootstrap status=complete)
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: kube-system
+    name: bootstrap
+  register: bootstrap_cm
+  until: (bootstrap_cm.resources | default([]) | map(attribute='data.status') | first | default('')) == 'complete'
+  retries: "{{ (bootstrap_timeout | default(2700) | int / 15) | int }}"
+  delay: 15
+  failed_when: false
+
+- name: Bootstrap completed in time
+  ansible.builtin.assert:
+    that: (bootstrap_cm.resources | default([]) | map(attribute='data.status') | first | default('')) == 'complete'
+    fail_msg: "bootstrap did not complete; on the bootstrap node: journalctl -b -u bootkube.service -u release-image.service"
+    quiet: true
+
+- name: Bootstrap etcd member removed (EtcdBootstrapMemberRemoved)
+  kubernetes.core.k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: Etcd
+    name: cluster
+  register: etcd_cr
+  until: >-
+    etcd_cr.resources | default([]) | length == 1
+    and etcd_cr.resources[0] | k8s_condition('EtcdBootstrapMemberRemoved') == 'True'
+  retries: 120
+  delay: 15
+
+- name: Remove the bootstrap VM
+  ansible.builtin.include_role:
+    name: vms
+  vars:
+    vms_flags: {bootstrap_enabled: false}

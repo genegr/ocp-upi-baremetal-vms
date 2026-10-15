@@ -1,0 +1,10 @@
+---
+htpasswd_idp_name: htpasswd
+htpasswd_secret_name: htpass-secret
+htpasswd_exclusive: true            # users missing from the list are removed
+htpasswd_prune_users: true          # ...together with their User, Identity and OAuth tokens
+htpasswd_verify_login: true         # log every user in through the OAuth server
+htpasswd_validate_certs: false      # the default ingress certificate is self-signed
+htpasswd_remove_kubeadmin: false    # delete kube-system/kubeadmin once a cluster-admin user logged in (irreversible)
+managed_labels:
+  app.kubernetes.io/managed-by: ocp-upi-htpasswd

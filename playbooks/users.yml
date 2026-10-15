@@ -1,0 +1,17 @@
+---
+# HTPasswd identity provider + users and roles from the cluster's user list (identity.htpasswd.users_file).
+#   ansible-playbook playbooks/users.yml -e cluster=<name> [--check --diff] [-e htpasswd_users_file=<path>]
+- name: Cluster model
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - cluster_model
+
+- name: HTPasswd users
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+  roles:
+    - htpasswd

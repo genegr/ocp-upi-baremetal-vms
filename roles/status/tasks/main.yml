@@ -1,0 +1,137 @@
+---
+# Read-only health report: DNS, HAProxy pools, VMs, cluster. Ends with HEALTHY or fails listing every FAIL.
+- name: Start the report
+  ansible.builtin.set_fact:
+    status_ok: []
+    status_warn: []
+    status_fail: []
+
+# --- DNS -----------------------------------------------------------------------------------------------------
+- name: DNS records
+  ansible.builtin.set_fact:
+    status_ok: "{{ status_ok + ([fqdn ~ ' -> ' ~ item.ip] if answer == item.ip else []) }}"
+    status_fail: "{{ status_fail + ([] if answer == item.ip else [fqdn ~ ': expected ' ~ item.ip ~ ', got ' ~ answer]) }}"
+  vars:
+    fqdn: "{{ item.name | replace('*', 'probe') }}.{{ c.cluster.domain }}"
+    answer: "{{ lookup('community.general.dig', fqdn, '@' ~ c.network.dns_servers[0]) }}"
+  loop: "{{ c.dns_records }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# --- HAProxy -------------------------------------------------------------------------------------------------
+- name: VIP ports
+  ansible.builtin.wait_for:
+    host: "{{ item.0 }}"
+    port: "{{ item.1 }}"
+    timeout: 3
+  loop: "{{ c.lb.vips | product([6443, 22623, 80, 443]) | list }}"
+  loop_control:
+    label: "{{ item.0 }}:{{ item.1 }}"
+  register: vip_ports
+  failed_when: false
+
+- name: Record VIP ports
+  ansible.builtin.set_fact:
+    status_fail: >-
+      {{ status_fail + (vip_ports.results | selectattr('failed', 'defined') | selectattr('failed')
+         | map(attribute='item') | map('join', ':') | map('regex_replace', '$', ' not listening') | list) }}
+
+- name: HAProxy stats
+  ansible.builtin.uri:
+    url: "http://{{ c.network.api_vip }}:{{ c.infra.haproxy.stats_port }}/stats;csv"
+    url_username: "{{ c.infra.haproxy.stats_user }}"
+    url_password: "{{ c.infra.haproxy.stats_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: lb_stats
+  failed_when: false
+
+# A pool with no backend UP fails; a DOWN master warns; a DOWN node in an ingress pool is normal (routers run on
+# only some nodes); bootstrap is ignored.
+- name: Record HAProxy pools
+  ansible.builtin.set_fact:
+    status_ok: "{{ status_ok + ['pool ' ~ item.key ~ ': ' ~ item.value.up | length ~ ' UP'] }}"
+    status_fail: "{{ status_fail + (['pool ' ~ item.key ~ ': no backend UP'] if item.value.up | length == 0 else []) }}"
+    status_warn: >-
+      {{ status_warn + (['pool ' ~ item.key ~ ': DOWN ' ~ item.value.down | join(' ')]
+         if item.value.down | length > 0 and item.value.up | length > 0 and 'ingress' not in item.key else []) }}
+  loop: "{{ (lb_stats.content | default('') | haproxy_pools) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: lb_stats.status | default(0) == 200
+
+- name: Stats page unreachable
+  ansible.builtin.set_fact:
+    status_warn: "{{ status_warn + ['HAProxy stats page not reachable'] }}"
+  when: lb_stats.status | default(0) != 200
+
+# --- VMs -----------------------------------------------------------------------------------------------------
+- name: Platform credentials
+  ansible.builtin.include_tasks: "{{ platform_dir }}/tasks/credentials.yml"
+
+- name: VM state
+  ansible.builtin.include_tasks: "{{ platform_dir }}/tasks/vm_state.yml"
+
+- name: Record VMs
+  ansible.builtin.set_fact:
+    status_ok: >-
+      {{ status_ok + ([item.name ~ ' powered ' ~ vm.power ~ ', nested_virt=' ~ vm.nested] if vm else
+         [item.name ~ ' absent (expected after bootstrap)'] if item.role == 'bootstrap' else []) }}
+    status_fail: >-
+      {{ status_fail + ([item.name ~ ' VM not found'] if not vm and item.role != 'bootstrap' else [])
+         + ([item.name ~ ' is powered off'] if vm and vm.power != 'on' else []) }}
+    status_warn: >-
+      {{ status_warn + ([item.name ~ ' nested_virt is ' ~ vm.nested ~ ', config says ' ~ item.nested_virt
+         ~ ' (rolling_update.yml applies it)'] if vm and vm.nested != item.nested_virt else []) }}
+  vars:
+    vm: "{{ vm_state[item.name] | default(false) }}"
+  loop: "{{ c.nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# --- Cluster -------------------------------------------------------------------------------------------------
+- name: Cluster objects
+  kubernetes.core.k8s_info:
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+  loop:
+    - {api: config.openshift.io/v1, kind: ClusterVersion}
+    - {api: v1, kind: Node}
+    - {api: config.openshift.io/v1, kind: ClusterOperator}
+    - {api: certificates.k8s.io/v1, kind: CertificateSigningRequest}
+  loop_control:
+    label: "{{ item.kind }}"
+  register: cluster_objects
+  failed_when: false
+
+- name: Record the cluster
+  ansible.builtin.set_fact:
+    status_ok: >-
+      {{ status_ok + (['clusterversion ' ~ cv.status.desired.version ~ ' Available'] if cv_ok else [])
+         + (nodes | selectattr('ready') | map(attribute='name') | map('regex_replace', '^(.*)$', 'node \1 Ready') | list)
+         + (['all cluster operators Available and not Degraded'] if co_bad | length == 0 and res[2] | length > 0 else []) }}
+    status_fail: >-
+      {{ status_fail + ([] if cv_ok else ['clusterversion not Available, or still Progressing'])
+         + (nodes | rejectattr('ready') | map(attribute='name') | map('regex_replace', '^(.*)$', 'node \1 not Ready') | list)
+         + (co_bad | map('regex_replace', '^', 'clusteroperator not Available/Degraded: ') | list) }}
+    status_warn: "{{ status_warn + ([pending | length ~ ' pending CSR(s)'] if pending | length > 0 else []) }}"
+  vars:
+    res: "{{ cluster_objects.results | map(attribute='resources', default=[]) | list }}"
+    cv: "{{ res[0] | first | default({}) }}"
+    cv_ok: "{{ cv | k8s_condition('Available') == 'True' and cv | k8s_condition('Progressing') == 'False' }}"
+    nodes: "{{ res[1] | k8s_node_readiness }}"
+    co_bad: "{{ res[2] | k8s_unhealthy_operators }}"
+    pending: "{{ res[3] | k8s_pending_csrs }}"
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ (status_ok | map('regex_replace', '^', 'ok    ') | list)
+             + (status_warn | map('regex_replace', '^', 'WARN  ') | list)
+             + (status_fail | map('regex_replace', '^', 'FAIL  ') | list)
+             + ['RESULT: ' ~ ('FAIL' if status_fail else 'HEALTHY' ~ (' (with warnings)' if status_warn else ''))] }}"
+
+- name: Result
+  ansible.builtin.assert:
+    that: status_fail | length == 0
+    fail_msg: "{{ status_fail }}"
+    quiet: true

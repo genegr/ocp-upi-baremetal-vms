@@ -1,0 +1,4 @@
+---
+# Resolve the channel again even if the cluster already has a pinned release.
+tools_repin: false
+tools_mirror: "https://mirror.openshift.com/pub/openshift-v4/{{ c.cluster.architecture }}/clients/ocp"

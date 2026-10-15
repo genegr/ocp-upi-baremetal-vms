@@ -1,0 +1,8 @@
+---
+# present = apply, absent = destroy (destroy.yml)
+vms_state: present
+# Persistent OpenTofu flags, merged into .state/clusters/<name>/tofu.tfvars.json, e.g. {bootstrap_enabled: false}.
+vms_flags: {}
+# Limit the apply to these resource addresses (rolling_update uses one VM at a time).
+vms_targets: []
+tofu_binary: /usr/local/bin/tofu

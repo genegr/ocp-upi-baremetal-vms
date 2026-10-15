@@ -1,0 +1,16 @@
+; {{ managed_header }}
+; Zone for OpenShift cluster {{ c.cluster.name }} (rendered from cluster.yaml by ocp-upi)
+$ORIGIN {{ zone }}.
+$TTL 300
+@   IN  SOA ns1.{{ zone }}. hostmaster.{{ zone }}. (
+        {{ zone_serial }} ; serial (hash of the records)
+        3600       ; refresh
+        600        ; retry
+        1209600    ; expire
+        300 )      ; minimum
+    IN  NS  ns1.{{ zone }}.
+ns1 IN  A   {{ dns_ip }}
+
+{% for r in c.dns_records %}
+{{ '%-24s' | format(r.name) }} IN  A   {{ r.ip }}
+{% endfor %}

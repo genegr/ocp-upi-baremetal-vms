@@ -1,0 +1,17 @@
+---
+# Galaxy collections in the toolbox image. Pinned to the versions bundled with ansible 14.4.0 (2026-09-08).
+collections:
+  - name: community.general     # terraform module, dig lookup
+    version: 13.4.0
+  - name: community.vmware      # platform: vsphere (info modules, boot manager, screenshot)
+    version: 6.3.0
+  - name: vmware.vmware
+    version: 2.10.0
+  - name: kubernetes.core       # k8s, k8s_info, k8s_drain
+    version: 6.5.0
+  - name: community.docker      # infra: docker_compose_v2
+    version: 5.3.0
+  - name: community.crypto      # openssh_keypair
+    version: 3.4.0
+  - name: ansible.posix
+    version: 2.2.2

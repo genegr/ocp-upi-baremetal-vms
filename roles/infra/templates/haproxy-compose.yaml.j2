@@ -1,0 +1,18 @@
+# {{ managed_header }}
+name: {{ c.cluster.name }}-haproxy
+services:
+  haproxy:
+    image: {{ c.infra.haproxy.image }}
+    container_name: {{ c.cluster.name }}-haproxy
+    restart: unless-stopped
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    # HAProxy runs unprivileged inside the container, so 80/443 map to 8080/4443.
+    ports:
+{% for vip in c.lb.vips %}
+      - "{{ vip }}:6443:6443"
+      - "{{ vip }}:22623:22623"
+      - "{{ vip }}:80:8080"
+      - "{{ vip }}:443:4443"
+      - "{{ vip }}:{{ c.infra.haproxy.stats_port }}:{{ c.infra.haproxy.stats_port }}"
+{% endfor %}

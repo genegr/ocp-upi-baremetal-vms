@@ -1,0 +1,28 @@
+---
+# One self-installing RHCOS ISO per node: NetworkManager keyfile(s) (static IP, matched by MAC) + the node's
+# ignition. Booting it applies the static IP, installs RHCOS to install_disk and reboots into it.
+#   -e iso_nodes=[...]   only these nodes (default: all)
+- name: Ignition configs exist
+  ansible.builtin.stat:
+    path: "{{ install_dir }}/bootstrap.ign"
+  register: bootstrap_ign
+
+- name: Ignition configs are present
+  ansible.builtin.assert:
+    that: bootstrap_ign.stat.exists
+    fail_msg: "no ignition configs in {{ install_dir }} (run --tags ignition)"
+    quiet: true
+
+- name: ISO directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0700"
+  loop: ["{{ cdir }}/iso", "{{ cdir }}/nodes"]
+
+- name: Build the node ISOs
+  ansible.builtin.include_tasks: node.yml
+  loop: "{{ c.nodes | selectattr('name', 'in', iso_nodes | default(c.nodes | map(attribute='name'))) | list }}"
+  loop_control:
+    loop_var: node
+    label: "{{ node.name }}"

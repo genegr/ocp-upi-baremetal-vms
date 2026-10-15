@@ -1,0 +1,50 @@
+---
+# Wait for the install to finish (what `openshift-install wait-for install-complete` checks), eject the install
+# ISOs (media change, no reboot), publish the kubeconfig and, if enabled, set up the HTPasswd users.
+- name: ClusterVersion Available and not Progressing
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: ClusterVersion
+    name: version
+  register: clusterversion
+  until: >-
+    clusterversion.resources | default([]) | length == 1
+    and clusterversion.resources[0] | k8s_condition('Available') == 'True'
+    and clusterversion.resources[0] | k8s_condition('Progressing') == 'False'
+  retries: "{{ (install_timeout | default(3600) | int / 20) | int }}"
+  delay: 20
+
+- name: Every cluster operator Available and not Degraded
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: ClusterOperator
+  register: operators
+  until: operators.resources | default([]) | length > 0 and operators.resources | k8s_unhealthy_operators | length == 0
+  retries: 60
+  delay: 20
+
+- name: Eject the install ISOs
+  ansible.builtin.include_role:
+    name: vms
+  vars:
+    vms_flags: {attach_iso: false}
+
+- name: Copy the kubeconfig (cluster.kubeconfig_copy)
+  ansible.builtin.copy:
+    src: "{{ kubeconfig }}"
+    dest: "{{ c.cluster.kubeconfig_copy | expanduser }}"
+    mode: "0600"
+    backup: true
+  when: c.cluster.kubeconfig_copy | length > 0
+
+- name: HTPasswd identity provider and users
+  ansible.builtin.include_role:
+    name: htpasswd
+  when: c.identity.htpasswd.enabled
+
+- name: Done
+  ansible.builtin.debug:
+    msg:
+      - "console: https://console-openshift-console.apps.{{ c.cluster.domain }}"
+      - "kubeconfig: {{ kubeconfig }}"
+      - "kubeadmin password: {{ install_dir }}/auth/kubeadmin-password"

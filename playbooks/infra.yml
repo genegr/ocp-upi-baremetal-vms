@@ -1,0 +1,18 @@
+---
+# DNS + HAProxy for one cluster on the infra Docker host.
+#   ansible-playbook playbooks/infra.yml -e cluster=<name> [--check --diff] [--tags dns|lb] [-e infra_state=absent]
+# A shared CoreDNS serves other environments too: always --check --diff first.
+- name: Cluster model
+  hosts: localhost
+  gather_facts: false
+  tags: [always]
+  roles:
+    - cluster_model
+
+- name: DNS and HAProxy
+  hosts: infra_hosts
+  gather_facts: true
+  vars:
+    c: "{{ hostvars['localhost'].c }}"
+  roles:
+    - infra

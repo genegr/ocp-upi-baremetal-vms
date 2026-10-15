@@ -1,0 +1,46 @@
+---
+# Destroy a cluster's VMs and install ISOs (irreversible).
+#   ansible-playbook playbooks/destroy.yml -e cluster=<name>            asks you to type the cluster name
+#   ... -e confirm=<name>                                               non-interactive
+#   ... -e destroy_infra=true                                           also remove its DNS zone and HAProxy
+- name: Cluster model
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - cluster_model
+
+- name: Confirm
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Type the cluster name to destroy its VMs
+      ansible.builtin.pause:
+        prompt: "Type '{{ c.cluster.name }}' to destroy its VMs"
+      register: typed
+      when: confirm is not defined
+
+    - name: The name matches
+      ansible.builtin.assert:
+        that: (confirm | default(typed.user_input | default(''))) == c.cluster.name
+        fail_msg: aborted
+        quiet: true
+
+- name: Destroy the VMs
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - role: vms
+      vars:
+        vms_state: absent
+
+- name: Remove DNS and HAProxy
+  hosts: infra_hosts
+  gather_facts: true
+  vars:
+    c: "{{ hostvars['localhost'].c }}"
+    infra_state: absent
+  tasks:
+    - name: Remove this cluster's zone and HAProxy
+      ansible.builtin.include_role:
+        name: infra
+      when: destroy_infra | default(false) | bool

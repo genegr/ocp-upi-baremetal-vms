@@ -1,0 +1,108 @@
+---
+- name: "{{ node.name }}: files directory"
+  ansible.builtin.file:
+    path: "{{ cdir }}/nodes/{{ node.name }}"
+    state: directory
+    mode: "0700"
+
+- name: "{{ node.name }}: role ignition"
+  ansible.builtin.slurp:
+    src: "{{ install_dir }}/{{ node.role }}.ign"
+  register: role_ign
+
+# The role ignition plus /etc/hostname, so no PTR records are needed.
+- name: "{{ node.name }}: node ignition"
+  ansible.builtin.copy:
+    content: "{{ node_ign | to_json(separators=(',', ':')) }}"
+    dest: "{{ cdir }}/nodes/{{ node.name }}/{{ node.name }}.ign"
+    mode: "0600"
+  vars:
+    ign: "{{ role_ign.content | b64decode | from_json }}"
+    hostname_file:
+      path: /etc/hostname
+      mode: 420
+      overwrite: true
+      contents:
+        source: "data:,{{ (node.hostname ~ '\n') | urlencode }}"
+    node_ign: >-
+      {{ ign | combine({'storage': {'files':
+           (ign.storage.files | default([]) | rejectattr('path', 'eq', '/etc/hostname') | list) + [hostname_file]}},
+         recursive=true) }}
+  register: node_ign_file
+
+- name: "{{ node.name }}: network keyfiles"
+  ansible.builtin.template:
+    src: "{{ 'nic-static' if nic.primary else 'nic-disabled' }}.nmconnection.j2"
+    dest: "{{ cdir }}/nodes/{{ node.name }}/{{ node.name }}-nic{{ index }}.nmconnection"
+    mode: "0600"
+  loop: "{{ node.nics }}"
+  loop_control:
+    loop_var: nic
+    index_var: index
+    label: "nic{{ index }} {{ nic.mac }}"
+  register: keyfiles
+
+- name: "{{ node.name }}: previous ISO checksum"
+  ansible.builtin.stat:
+    path: "{{ cdir }}/iso/{{ node.name }}.iso.sha256"
+  register: iso_sha
+
+# Rebuild decisions use the inputs' *content* (not Ansible's `changed`, which also flips on mode changes):
+# a digest of the node ignition + keyfiles, recorded next to the ISO. Once a node is installed its ISO may be
+# deleted; the .sha256 file is the record that it was built.
+- name: "{{ node.name }}: ISO inputs digest"
+  ansible.builtin.set_fact:
+    iso_inputs_digest: "{{ ([node_ign_file.checksum] + keyfiles.results | map(attribute='checksum') | list) | join(',') | hash('sha256') }}"
+    iso_inputs_recorded: "{{ lookup('ansible.builtin.file', cdir ~ '/iso/' ~ node.name ~ '.iso.inputs', errors='ignore') | default('', true) | trim }}"
+
+# ISOs built before digests were recorded: take the current inputs as theirs (no rebuild).
+- name: "{{ node.name }}: record the inputs of an existing ISO"
+  ansible.builtin.copy:
+    content: "{{ iso_inputs_digest }}\n"
+    dest: "{{ cdir }}/iso/{{ node.name }}.iso.inputs"
+    mode: "0600"
+  when: iso_sha.stat.exists and iso_inputs_recorded | length == 0
+
+- name: "{{ node.name }}: build the ISO"
+  when: not iso_sha.stat.exists or (iso_inputs_recorded | length > 0 and iso_inputs_recorded != iso_inputs_digest)
+  block:
+    - name: "{{ node.name }}: bootstrap ignition is less than 20 h old"
+      ansible.builtin.assert:
+        that: (now(utc=true).timestamp() - bootstrap_ign.stat.mtime) < 72000
+        fail_msg: "bootstrap ignition is older than 20 h (certs expire at 24 h): rerun with --tags ignition -e ignition_force=true"
+        quiet: true
+      when: node.role == 'bootstrap'
+
+    - name: "{{ node.name }}: remove the old ISO"
+      ansible.builtin.file:
+        path: "{{ cdir }}/iso/{{ node.name }}.iso"
+        state: absent
+
+    # coreos-installer has no Ansible module: a sanctioned command (the binary is in the toolbox image).
+    - name: "{{ node.name }}: coreos-installer iso customize"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['coreos-installer', 'iso', 'customize',
+              '--dest-device', c.cluster.install_disk,
+              '--dest-ignition', cdir ~ '/nodes/' ~ node.name ~ '/' ~ node.name ~ '.ign']
+             + (keyfiles.results | map(attribute='dest') | map('regex_replace', '^', '--network-keyfile=') | list)
+             + ['-o', cdir ~ '/iso/' ~ node.name ~ '.iso', cdir ~ '/rhcos-live.iso'] }}
+        creates: "{{ cdir }}/iso/{{ node.name }}.iso"
+
+    - name: "{{ node.name }}: ISO checksum"
+      ansible.builtin.stat:
+        path: "{{ cdir }}/iso/{{ node.name }}.iso"
+        checksum_algorithm: sha256
+      register: iso_stat
+
+    - name: "{{ node.name }}: record the checksum (OpenTofu names the uploaded ISO after it) and the inputs"
+      ansible.builtin.copy:
+        content: "{{ item.content }}\n"
+        dest: "{{ cdir }}/iso/{{ node.name }}.{{ item.ext }}"
+        mode: "0600"
+      loop:
+        - {ext: iso.sha256, content: "{{ iso_stat.stat.checksum | default('') }}"}
+        - {ext: iso.inputs, content: "{{ iso_inputs_digest }}"}
+      loop_control:
+        label: "{{ item.ext }}"
+      when: iso_stat.stat.exists

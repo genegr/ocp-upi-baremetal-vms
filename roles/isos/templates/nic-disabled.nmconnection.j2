@@ -1,0 +1,13 @@
+[connection]
+id={{ node.name }}-nic{{ index }}
+type=ethernet
+autoconnect=true
+
+[ethernet]
+mac-address={{ nic.mac }}
+
+[ipv4]
+method=disabled
+
+[ipv6]
+method=disabled

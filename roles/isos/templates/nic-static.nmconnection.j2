@@ -1,0 +1,19 @@
+[connection]
+id={{ node.name }}-nic0
+type=ethernet
+autoconnect=true
+
+[ethernet]
+mac-address={{ nic.mac }}
+
+[ipv4]
+method=manual
+address1={{ node.ip }}/{{ c.network.prefix }},{{ c.network.gateway }}
+dns={% for s in c.network.dns_servers %}{{ s }};{% endfor %}
+
+dns-search={% for s in c.network.dns_search %}{{ s }};{% endfor %}
+
+may-fail=false
+
+[ipv6]
+method=disabled

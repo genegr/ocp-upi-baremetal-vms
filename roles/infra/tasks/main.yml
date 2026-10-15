@@ -1,0 +1,29 @@
+---
+# DNS + HAProxy for one cluster, as containers on the infra Docker host. Runs on host "infra" (added by
+# cluster_model); the model comes from the controller: c = hostvars['localhost'].c (set in the play).
+- name: Infra facts
+  ansible.builtin.set_fact:
+    zone: "{{ c.cluster.domain }}"
+    base_dir: "{{ c.infra.base_dir | regex_replace('^~', ansible_facts.env.HOME) }}"
+    cluster_dir: "{{ c.infra.base_dir | regex_replace('^~', ansible_facts.env.HOME) }}/{{ c.cluster.name }}"
+    dns_ip: "{{ c.network.dns_servers[0] }}"
+    managed_header: Managed by ocp-upi (Ansible) - local edits will be overwritten
+    # SOA serial derived from the records, so it changes only when the zone content changes.
+    zone_serial: "{{ ((c.dns_records + c.network.dns_servers) | to_json | hash('md5'))[:7] | int(base=16) }}"
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: DNS (shared CoreDNS, delegated sub-zone)
+  ansible.builtin.import_tasks: dns-shared.yml
+  when: c.infra.dns.mode == 'shared'
+  tags: [dns]
+
+- name: DNS (project-managed CoreDNS)
+  ansible.builtin.import_tasks: dns-managed.yml
+  when: c.infra.dns.mode == 'managed'
+  tags: [dns]
+
+- name: HAProxy
+  ansible.builtin.import_tasks: haproxy.yml
+  tags: [lb]

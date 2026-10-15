@@ -1,0 +1,18 @@
+---
+# Apply VM changes that need a power cycle (memory, CPUs, nested virtualization), one node at a time:
+# drain -> targeted OpenTofu apply -> wait for a real reboot + Ready -> uncordon -> operators settled.
+#   ansible-playbook playbooks/rolling_update.yml -e cluster=<name> [-e rolling_yes=true] [-e '{"rolling_nodes": ["worker0"]}']
+- name: Cluster model
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - cluster_model
+
+- name: Rolling update
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+  roles:
+    - rolling_update

@@ -1,0 +1,88 @@
+---
+# install-config.yaml -> manifests (mastersSchedulable) -> ignition configs. The bootstrap ignition certificates are
+# valid for 24 h, so the isos and vms phases must follow within that window.
+#   -e ignition_force=true   start over: the existing install dir is kept as install.<timestamp>
+- name: Existing ignition configs
+  ansible.builtin.stat:
+    path: "{{ install_dir }}/bootstrap.ign"
+  register: existing_ignition
+
+- name: Keep the previous install dir
+  when: existing_ignition.stat.exists and ignition_force | default(false) | bool
+  block:
+    - name: Copy it aside
+      ansible.builtin.copy:
+        src: "{{ install_dir }}/"
+        dest: "{{ install_dir }}.{{ now(utc=true, fmt='%Y%m%d-%H%M%S') }}/"
+        remote_src: true
+        mode: preserve
+
+    - name: Remove it
+      ansible.builtin.file:
+        path: "{{ install_dir }}"
+        state: absent
+
+- name: Install dir
+  ansible.builtin.file:
+    path: "{{ install_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Pull secret and SSH keys
+  ansible.builtin.set_fact:
+    pull_secret: >-
+      {{ (vault_pull_secret | from_json if vault_pull_secret is string else vault_pull_secret)
+         if vault_pull_secret is defined
+         else lookup('ansible.builtin.file', c.cluster.pull_secret_file | expanduser) | from_json }}
+    ssh_keys: >-
+      {{ [lookup('ansible.builtin.file', ssh_key ~ '.pub')]
+         + ([lookup('ansible.builtin.file', c.cluster.ssh_pubkey_file | expanduser)] if c.cluster.ssh_pubkey_file | length > 0 else []) }}
+  no_log: true
+
+- name: install-config.yaml
+  ansible.builtin.copy:
+    content: "{{ install_config | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ item }}"
+    mode: "0600"
+  loop:
+    - "{{ install_dir }}/install-config.yaml"        # consumed by openshift-install
+    - "{{ cdir }}/install-config.yaml.used"          # kept for reference
+  vars:
+    install_config: >-
+      {{ {
+        'apiVersion': 'v1',
+        'baseDomain': c.cluster.base_domain,
+        'metadata': {'name': c.cluster.name},
+        'compute': [{'name': 'worker', 'hyperthreading': 'Enabled', 'replicas': 0}],
+        'controlPlane': {'name': 'master', 'hyperthreading': 'Enabled',
+                         'replicas': c.nodes | selectattr('role', 'eq', 'master') | list | length},
+        'networking': {
+          'networkType': c.cluster.network_type,
+          'clusterNetwork': [{'cidr': c.cluster.cluster_network, 'hostPrefix': c.cluster.host_prefix}],
+          'machineNetwork': [{'cidr': c.network.cidr}],
+          'serviceNetwork': [c.cluster.service_network]},
+        'platform': {'none': {}},
+        'fips': false,
+        'pullSecret': pull_secret | to_json(separators=(',', ':')),
+        'sshKey': ssh_keys | join('\n'),
+      } | combine(c.cluster.install_config_extra, recursive=true) }}
+  when: not existing_ignition.stat.exists or ignition_force | default(false) | bool
+  no_log: true
+
+# openshift-install has no Ansible module: a sanctioned command, guarded by `creates` (no rerun once ignition exists).
+- name: Create the manifests
+  ansible.builtin.command:
+    cmd: "{{ ocp_bin_dir }}/openshift-install create manifests --dir {{ install_dir }}"
+    creates: "{{ install_dir }}/bootstrap.ign"
+
+- name: mastersSchedulable {{ c.cluster.masters_schedulable }}
+  ansible.builtin.replace:
+    path: "{{ install_dir }}/manifests/cluster-scheduler-02-config.yml"
+    regexp: 'mastersSchedulable: \w+'
+    replace: "mastersSchedulable: {{ c.cluster.masters_schedulable | lower }}"
+  when: (install_dir ~ '/manifests/cluster-scheduler-02-config.yml') is file
+
+- name: Create the ignition configs
+  ansible.builtin.command:
+    cmd: "{{ ocp_bin_dir }}/openshift-install create ignition-configs --dir {{ install_dir }}"
+    creates: "{{ install_dir }}/bootstrap.ign"

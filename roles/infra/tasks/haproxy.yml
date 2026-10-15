@@ -1,0 +1,113 @@
+---
+# HAProxy for the API (6443), machine-config server (22623) and ingress (80/443), on the cluster VIPs.
+- name: Deploy HAProxy
+  when: infra_state == 'present'
+  block:
+    - name: HAProxy directory
+      ansible.builtin.file:
+        path: "{{ cluster_dir }}/haproxy"
+        state: directory
+        mode: "0755"
+
+    - name: haproxy.cfg (validated with haproxy -c before it is put in place)
+      ansible.builtin.template:
+        src: haproxy.cfg.j2
+        dest: "{{ cluster_dir }}/haproxy/haproxy.cfg"
+        mode: "0644"
+        backup: true
+        validate: >-
+          docker run --rm --user 0 -v %s:/tmp/haproxy.cfg:ro {{ c.infra.haproxy.image }}
+          haproxy -c -f /tmp/haproxy.cfg
+      register: haproxy_cfg
+
+    - name: HAProxy compose project
+      ansible.builtin.template:
+        src: haproxy-compose.yaml.j2
+        dest: "{{ cluster_dir }}/haproxy/docker-compose.yaml"
+        mode: "0644"
+      register: haproxy_compose
+
+    # One-time cutover from a previously hand-made HAProxy that holds the same VIP ports.
+    # Its directory is left in place as a backup.
+    - name: Stat the HAProxy compose project being replaced
+      ansible.builtin.stat:
+        path: "{{ c.infra.haproxy.replace_compose_dir | regex_replace('^~', ansible_facts.env.HOME) }}"
+      register: legacy_lb
+      when: c.infra.haproxy.replace_compose_dir | length > 0
+
+    - name: Start HAProxy (rolls back to the replaced project on failure)
+      when: not ansible_check_mode
+      block:
+        - name: Stop the HAProxy compose project being replaced
+          community.docker.docker_compose_v2:
+            project_src: "{{ legacy_lb.stat.path }}"
+            state: absent
+          register: legacy_stopped
+          when:
+            - c.infra.haproxy.replace_compose_dir | length > 0
+            - legacy_lb.stat.exists
+
+        - name: HAProxy container is running
+          community.docker.docker_compose_v2:
+            project_src: "{{ cluster_dir }}/haproxy"
+            state: present
+          register: haproxy_up
+
+        - name: Restart HAProxy to load the new config
+          community.docker.docker_compose_v2:
+            project_src: "{{ cluster_dir }}/haproxy"
+            state: restarted
+          when: (haproxy_cfg.changed or haproxy_compose.changed) and not haproxy_up.changed
+
+        - name: HAProxy listens on every VIP port
+          ansible.builtin.wait_for:
+            host: "{{ item.0 }}"
+            port: "{{ item.1 }}"
+            timeout: 15
+          loop: "{{ c.lb.vips | product([6443, 22623, 80, 443, c.infra.haproxy.stats_port]) | list }}"
+          loop_control:
+            label: "{{ item.0 }}:{{ item.1 }}"
+
+        - name: HAProxy stats page answers
+          ansible.builtin.uri:
+            url: "http://{{ c.network.api_vip }}:{{ c.infra.haproxy.stats_port }}/stats"
+            url_username: "{{ c.infra.haproxy.stats_user }}"
+            url_password: "{{ c.infra.haproxy.stats_password }}"
+            force_basic_auth: true
+
+      rescue:
+        - name: Stop the new HAProxy
+          community.docker.docker_compose_v2:
+            project_src: "{{ cluster_dir }}/haproxy"
+            state: absent
+          failed_when: false
+          when: legacy_stopped.changed | default(false)
+
+        - name: Bring the replaced HAProxy back
+          community.docker.docker_compose_v2:
+            project_src: "{{ legacy_lb.stat.path }}"
+            state: present
+          when: legacy_stopped.changed | default(false)
+
+        - name: Report the rollback
+          ansible.builtin.fail:
+            msg: "HAProxy deployment failed and was rolled back: {{ ansible_failed_result.msg | default(ansible_failed_result) }}"
+
+- name: Remove HAProxy
+  when: infra_state == 'absent'
+  block:
+    - name: Stat the HAProxy project
+      ansible.builtin.stat:
+        path: "{{ cluster_dir }}/haproxy/docker-compose.yaml"
+      register: haproxy_project
+
+    - name: Stop HAProxy
+      community.docker.docker_compose_v2:
+        project_src: "{{ cluster_dir }}/haproxy"
+        state: absent
+      when: haproxy_project.stat.exists
+
+    - name: Remove the HAProxy directory
+      ansible.builtin.file:
+        path: "{{ cluster_dir }}/haproxy"
+        state: absent

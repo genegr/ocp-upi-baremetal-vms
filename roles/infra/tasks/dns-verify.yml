@@ -1,0 +1,21 @@
+---
+# Verified from the controller (community.general.dig lookup, dnspython in the toolbox), retried while CoreDNS restarts.
+- name: Every cluster record resolves @{{ dns_ip }}
+  ansible.builtin.debug:
+    msg: "{{ lookup('community.general.dig', (item.name | replace('*', 'probe')) ~ '.' ~ zone, '@' ~ dns_ip) }}"
+  register: answer
+  until: answer.msg == item.ip
+  retries: 10
+  delay: 2
+  delegate_to: localhost
+  loop: "{{ c.dns_records }}"
+  loop_control:
+    label: "{{ item.name }}.{{ zone }} -> {{ item.ip }}"
+
+- name: Other names served by this DNS still resolve
+  ansible.builtin.assert:
+    that: lookup('community.general.dig', item, '@' ~ dns_ip) not in ['NXDOMAIN', '']
+    fail_msg: "{{ item }} no longer resolves @{{ dns_ip }}"
+    quiet: true
+  delegate_to: localhost
+  loop: "{{ c.infra.dns.verify_names | default([]) }}"

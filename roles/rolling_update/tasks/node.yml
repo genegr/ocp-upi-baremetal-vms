@@ -1,0 +1,94 @@
+---
+- name: "{{ node_name }}: node"
+  ansible.builtin.set_fact:
+    rnode: "{{ c.nodes | selectattr('name', 'eq', node_name) | first }}"
+    rtarget: "{{ lookup('ansible.builtin.template', platform_dir ~ '/vm_address.j2', template_vars={'node': node_name}) | trim }}"
+
+- name: "{{ node_name }}: pending VM changes"
+  community.general.terraform:
+    project_path: "{{ platform_dir }}"
+    binary_path: /usr/local/bin/tofu
+    state: present
+    force_init: true
+    backend_config:
+      path: "{{ cdir }}/terraform.tfstate"
+    variables_files: ["{{ tfvars_file }}"]
+    targets: ["{{ rtarget }}"]
+  environment: "{{ platform_env | combine({'TF_DATA_DIR': cdir ~ '/.terraform'}) }}"
+  check_mode: true
+  register: rplan
+
+- name: "{{ node_name }}: rolling update"
+  when: rplan.changed and not ansible_check_mode
+  block:
+    - name: "{{ node_name }}: confirm"
+      ansible.builtin.pause:
+        prompt: "Cordon, drain and power-cycle {{ node_name }}? Enter to continue, Ctrl-C then A to abort"
+      when: not rolling_yes | default(false) | bool
+
+    - name: "{{ node_name }}: boot ID before"
+      kubernetes.core.k8s_info:
+        kind: Node
+        name: "{{ rnode.hostname }}"
+      register: before
+
+    - name: "{{ node_name }}: drain"
+      kubernetes.core.k8s_drain:
+        name: "{{ rnode.hostname }}"
+        state: drain
+        delete_options:
+          ignore_daemonsets: true
+          delete_emptydir_data: true
+          wait_timeout: 900
+
+    - name: "{{ node_name }}: apply the change (power cycle)"
+      ansible.builtin.include_role:
+        name: vms
+      vars:
+        vms_targets: ["{{ rtarget }}"]
+
+    - name: "{{ node_name }}: back Ready after a real reboot"
+      kubernetes.core.k8s_info:
+        kind: Node
+        name: "{{ rnode.hostname }}"
+      register: after
+      until: >-
+        after.resources | default([]) | length == 1
+        and after.resources[0].status.nodeInfo.bootID != before.resources[0].status.nodeInfo.bootID
+        and after.resources[0] | k8s_condition('Ready') == 'True'
+      retries: 120
+      delay: 15
+
+    - name: "{{ node_name }}: uncordon"
+      kubernetes.core.k8s_drain:
+        name: "{{ rnode.hostname }}"
+        state: uncordon
+
+    # Right after an uncordon the operators may not have reacted yet: settled, wait a minute, settled again.
+    - name: "{{ node_name }}: cluster operators settled"
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: ClusterOperator
+      register: rco
+      until: &settled >-
+        rco.resources | k8s_unhealthy_operators | length == 0
+        and rco.resources | map('k8s_condition', 'Progressing') | select('eq', 'True') | list | length == 0
+      retries: 90
+      delay: 20
+
+    - name: "{{ node_name }}: give the operators a minute"
+      ansible.builtin.pause:
+        seconds: 60
+
+    - name: "{{ node_name }}: still settled"
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: ClusterOperator
+      register: rco
+      until: *settled
+      retries: 90
+      delay: 20
+
+    - name: "{{ node_name }}: done"
+      ansible.builtin.debug:
+        msg: "{{ rnode.hostname }}: memory {{ after.resources[0].status.capacity.memory }}, cpu {{ after.resources[0].status.capacity.cpu }}"

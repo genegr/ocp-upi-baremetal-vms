@@ -1,0 +1,275 @@
+---
+# HTPasswd identity provider + users and role bindings, from the user list identity.htpasswd.users_file
+# (clusters/<name>.htpasswd.yml). Idempotent: a user's bcrypt hash is reused while the password still matches,
+# so a rerun with no changes changes nothing and doesn't restart the OAuth server.
+- name: Read the user list
+  ansible.builtin.include_vars:
+    file: "{{ htpasswd_users_file | default(c.identity.htpasswd.users_file) }}"
+    name: htpasswd_list
+  no_log: true
+
+# Plain vars file (htpasswd_users: [...]) or the older inventory layout (all: vars: htpasswd_users: [...]).
+- name: Users from the list
+  ansible.builtin.set_fact:
+    htpasswd_users: "{{ htpasswd_list.htpasswd_users | default(htpasswd_list.all.vars.htpasswd_users | default([])) }}"
+  no_log: true
+
+- name: Users are well-formed
+  ansible.builtin.assert:
+    that:
+      - htpasswd_users is defined and htpasswd_users | length > 0
+      - htpasswd_users | map(attribute='name') | select('match', '^[a-z0-9]([-a-z0-9_.@]*[a-z0-9])?$') | list | length == htpasswd_users | length
+      - htpasswd_users | selectattr('password', 'undefined') | list | length == 0
+    fail_msg: "htpasswd_users must be a non-empty list of {name, password[, roles][, cluster_role]} with lowercase names"
+    quiet: true
+
+# Everything referenced must exist before anything is written, so a typo fails the run instead of leaving
+# a binding that points at nothing.
+- name: Role assignments
+  ansible.builtin.set_fact:
+    bindings: "{{ htpasswd_users | htpasswd_bindings }}"
+
+- name: Look up the referenced ClusterRoles
+  kubernetes.core.k8s_info:
+    api_version: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    name: "{{ item }}"
+  register: cluster_roles
+  loop: "{{ bindings | selectattr('kind', 'eq', 'ClusterRole') | map(attribute='role') | unique | list }}"
+
+- name: Look up the referenced namespaces
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}"
+  register: namespaces
+  loop: "{{ bindings | selectattr('scope', 'eq', 'namespace') | map(attribute='namespace') | unique | list }}"
+
+- name: Look up the referenced namespaced Roles
+  kubernetes.core.k8s_info:
+    api_version: rbac.authorization.k8s.io/v1
+    kind: Role
+    namespace: "{{ item.namespace }}"
+    name: "{{ item.role }}"
+  register: ns_roles
+  loop: "{{ bindings | selectattr('kind', 'eq', 'Role') | list }}"
+  loop_control:
+    label: "{{ item.namespace }}/{{ item.role }}"
+
+- name: Referenced roles and namespaces exist
+  ansible.builtin.assert:
+    that: missing | length == 0
+    fail_msg: "not found: {{ missing | join(', ') }}"
+    quiet: true
+  vars:
+    missing: >-
+      {{ (cluster_roles.results | rejectattr('resources') | map(attribute='item') | map('regex_replace', '^', 'ClusterRole ') | list)
+         + (namespaces.results | rejectattr('resources') | map(attribute='item') | map('regex_replace', '^', 'namespace ') | list)
+         + (ns_roles.results | rejectattr('resources') | map(attribute='item') | map(attribute='ref') | list) }}
+
+- name: Read the current htpasswd secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: openshift-config
+    name: "{{ htpasswd_secret_name }}"
+  register: current_secret
+  no_log: true
+
+- name: Render the htpasswd file
+  ansible.builtin.set_fact:
+    existing_htpasswd: "{{ (current_secret.resources[0].data.htpasswd | b64decode) if current_secret.resources else '' }}"
+    htpasswd_content: >-
+      {{ htpasswd_users | htpasswd_render(
+           (current_secret.resources[0].data.htpasswd | b64decode) if current_secret.resources else '',
+           htpasswd_exclusive) }}
+  no_log: true
+
+- name: Users removed from the list
+  ansible.builtin.set_fact:
+    removed_users: >-
+      {{ (existing_htpasswd.splitlines() | select('search', ':') | map('split', ':') | map('first') | list)
+         | difference(htpasswd_users | map(attribute='name') | list) if htpasswd_exclusive else [] }}
+
+- name: htpasswd secret
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: "{{ htpasswd_secret_name }}"
+        namespace: openshift-config
+        labels: "{{ managed_labels }}"
+      data:
+        htpasswd: "{{ htpasswd_content | b64encode }}"
+  register: secret_result
+  no_log: true
+
+- name: Read the cluster OAuth config
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: OAuth
+    name: cluster
+  register: oauth
+
+# A merge patch replaces the whole list, so keep every other identity provider as it is.
+- name: OAuth identity providers include {{ htpasswd_idp_name }}
+  kubernetes.core.k8s:
+    state: present
+    merge_type: merge
+    definition:
+      apiVersion: config.openshift.io/v1
+      kind: OAuth
+      metadata:
+        name: cluster
+      spec:
+        identityProviders: >-
+          {{ (oauth.resources[0].spec.identityProviders | default([]) | rejectattr('name', 'eq', htpasswd_idp_name) | list)
+             + [{'name': htpasswd_idp_name, 'mappingMethod': 'claim', 'type': 'HTPasswd',
+                 'htpasswd': {'fileData': {'name': htpasswd_secret_name}}}] }}
+  register: oauth_result
+
+- name: Role bindings (cluster-wide and per namespace)
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: "{{ 'ClusterRoleBinding' if item.scope == 'cluster' else 'RoleBinding' }}"
+      metadata: >-
+        {{ {'name': item.name, 'labels': managed_labels}
+           | combine({'namespace': item.namespace} if item.scope == 'namespace' else {}) }}
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: "{{ item.kind }}"
+        name: "{{ item.role }}"
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: User
+          name: "{{ item.user }}"
+  loop: "{{ bindings }}"
+  loop_control:
+    label: "{{ item.user }} -> {{ item.kind }} {{ item.role }}{{ (' in ' ~ item.namespace) if item.namespace else ' (cluster-wide)' }}"
+
+- name: Find the ClusterRoleBindings this playbook manages
+  kubernetes.core.k8s_info:
+    api_version: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    label_selectors: ["app.kubernetes.io/managed-by=ocp-upi-htpasswd"]
+  register: managed_crbs
+
+- name: Find the RoleBindings this playbook manages (all namespaces)
+  kubernetes.core.k8s_info:
+    api_version: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    label_selectors: ["app.kubernetes.io/managed-by=ocp-upi-htpasswd"]
+  register: managed_rbs
+
+- name: Remove ClusterRoleBindings no longer in the list
+  kubernetes.core.k8s:
+    state: absent
+    api_version: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    name: "{{ item }}"
+  loop: "{{ managed_crbs.resources | resource_keys | difference(bindings | map(attribute='key')) }}"
+
+- name: Remove RoleBindings no longer in the list
+  kubernetes.core.k8s:
+    state: absent
+    api_version: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    namespace: "{{ item.split('/')[0] }}"
+    name: "{{ item.split('/')[1] }}"
+  loop: "{{ managed_rbs.resources | resource_keys | difference(bindings | map(attribute='key')) }}"
+
+- name: Prune removed users
+  when: htpasswd_prune_users and removed_users | length > 0
+  block:
+    - name: Delete their User objects
+      kubernetes.core.k8s:
+        state: absent
+        api_version: user.openshift.io/v1
+        kind: User
+        name: "{{ item }}"
+      loop: "{{ removed_users }}"
+
+    - name: Delete their Identity objects
+      kubernetes.core.k8s:
+        state: absent
+        api_version: user.openshift.io/v1
+        kind: Identity
+        name: "{{ htpasswd_idp_name }}:{{ item }}"
+      loop: "{{ removed_users }}"
+
+    - name: List OAuth access tokens
+      kubernetes.core.k8s_info:
+        api_version: oauth.openshift.io/v1
+        kind: OAuthAccessToken
+      register: tokens
+      no_log: true
+
+    - name: Revoke their OAuth access tokens
+      kubernetes.core.k8s:
+        state: absent
+        api_version: oauth.openshift.io/v1
+        kind: OAuthAccessToken
+        name: "{{ item.metadata.name }}"
+      loop: "{{ tokens.resources | selectattr('userName', 'in', removed_users) | list }}"
+      loop_control:
+        label: "{{ item.userName }}"
+
+- name: Verify every user can log in
+  when: htpasswd_verify_login and not ansible_check_mode
+  block:
+    - name: OAuth server route
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: openshift-authentication
+        name: oauth-openshift
+      register: oauth_route
+
+    # Same request `oc login` makes. It returns 302 with a token once the OAuth server has the new secret, and
+    # retries while the OAuth pods roll out.
+    - name: Log in through the OAuth server
+      ansible.builtin.uri:
+        url: "https://{{ oauth_route.resources[0].spec.host }}/oauth/authorize?response_type=token&client_id=openshift-challenging-client"
+        url_username: "{{ item.name }}"
+        url_password: "{{ item.password }}"
+        force_basic_auth: true
+        headers:
+          X-CSRF-Token: "1"
+        follow_redirects: none
+        validate_certs: "{{ htpasswd_validate_certs }}"
+        status_code: [302]
+      register: login
+      until: login.status == 302 and 'access_token=' in (login.location | default(''))
+      retries: 30
+      delay: 10
+      loop: "{{ htpasswd_users }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+
+    - name: Logins succeeded
+      ansible.builtin.debug:
+        msg: "{{ htpasswd_users | map(attribute='name') | join(', ') }} can log in with {{ htpasswd_idp_name }}"
+
+- name: Remove the kubeadmin user
+  when: htpasswd_remove_kubeadmin and not ansible_check_mode
+  block:
+    - name: A cluster-admin user exists and was verified
+      ansible.builtin.assert:
+        that:
+          - htpasswd_verify_login
+          - bindings | selectattr('scope', 'eq', 'cluster') | selectattr('role', 'eq', 'cluster-admin') | list | length > 0
+        fail_msg: "refusing to remove kubeadmin without a verified cluster-admin user"
+
+    - name: Delete kube-system/kubeadmin
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Secret
+        namespace: kube-system
+        name: kubeadmin

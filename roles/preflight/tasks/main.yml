@@ -1,0 +1,84 @@
+---
+# Everything the install depends on, checked before any VM is created. Collects all failures, then fails once.
+#   -e preflight_allow_alive=true   don't fail when node IPs already answer (re-running against a live cluster)
+- name: Start with no failures
+  ansible.builtin.set_fact:
+    preflight_failures: []
+
+- name: DNS records resolve @{{ c.network.dns_servers[0] }}
+  ansible.builtin.set_fact:
+    preflight_failures: >-
+      {{ preflight_failures + ([] if answer == item.ip
+         else [fqdn ~ ': expected ' ~ item.ip ~ ', got ' ~ answer]) }}
+  vars:
+    fqdn: "{{ item.name | replace('*', 'probe') }}.{{ c.cluster.domain }}"
+    answer: "{{ lookup('community.general.dig', fqdn, '@' ~ c.network.dns_servers[0]) }}"
+  loop: "{{ c.dns_records }}"
+  loop_control:
+    label: "{{ item.name }}.{{ c.cluster.domain }}"
+
+- name: HAProxy listens on the VIPs
+  ansible.builtin.wait_for:
+    host: "{{ item.0 }}"
+    port: "{{ item.1 }}"
+    timeout: 3
+  loop: "{{ c.lb.vips | product([6443, 22623, 80, 443]) | list }}"
+  loop_control:
+    label: "{{ item.0 }}:{{ item.1 }}"
+  register: lb_ports
+  failed_when: false
+
+- name: Record closed LB ports
+  ansible.builtin.set_fact:
+    preflight_failures: >-
+      {{ preflight_failures + (lb_ports.results | selectattr('failed', 'defined') | selectattr('failed')
+         | map(attribute='item') | map('join', ':') | map('regex_replace', '$', ' not listening') | list) }}
+
+# No module sends ICMP; ping is a sanctioned command (read-only, changed_when: false).
+- name: Node addresses are free
+  ansible.builtin.command: ping -c1 -W1 {{ item.ip }}
+  loop: "{{ c.nodes }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.ip }}"
+  register: node_ping
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Record addresses already in use
+  ansible.builtin.set_fact:
+    preflight_failures: >-
+      {{ preflight_failures + (node_ping.results | selectattr('rc', 'eq', 0)
+         | map(attribute='item') | map(attribute='ip') | map('regex_replace', '$', ' already answers ping') | list) }}
+  when: not preflight_allow_alive | default(false) | bool
+
+- name: Pull secret and SSH key are available
+  ansible.builtin.set_fact:
+    preflight_failures: >-
+      {{ preflight_failures
+         + ([] if vault_pull_secret is defined or c.cluster.pull_secret_file | length > 0
+            else ['no pull secret: set vault_pull_secret in clusters/vault.yml'])
+         + ([] if (ssh_key ~ '.pub') is file else ['no SSH key at ' ~ ssh_key ~ '.pub (run --tags tools)']) }}
+
+- name: Base RHCOS ISO is downloaded
+  ansible.builtin.set_fact:
+    preflight_failures: "{{ preflight_failures + ([] if (cdir ~ '/rhcos-live.iso') is file else ['RHCOS ISO missing (run --tags tools)']) }}"
+
+- name: HTPasswd user list exists (identity.htpasswd.enabled)
+  ansible.builtin.set_fact:
+    preflight_failures: >-
+      {{ preflight_failures + ([] if c.identity.htpasswd.users_file is file
+         else ['identity.htpasswd.enabled but no user list at ' ~ c.identity.htpasswd.users_file]) }}
+  when: c.identity.htpasswd.enabled
+
+- name: Platform credentials
+  ansible.builtin.include_tasks: "{{ platform_dir }}/tasks/credentials.yml"
+
+- name: Platform objects
+  ansible.builtin.include_tasks: "{{ platform_dir }}/tasks/preflight.yml"
+
+- name: Preflight result
+  ansible.builtin.assert:
+    that: preflight_failures | length == 0
+    success_msg: "preflight passed for {{ c.cluster.name }}"
+    fail_msg: "{{ preflight_failures }}"
