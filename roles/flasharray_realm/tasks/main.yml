@@ -1,0 +1,70 @@
+---
+# Dedicated FlashArray realm for the cluster (secure multi-tenancy, as PX-CSI documents it):
+#   realm (+ quota) -> pod inside the realm -> management-access policy (role scoped to the realm) -> role-less user
+#   that is a member of that policy, with its own API token.
+# The array-admin token (vault_flasharray_api_token) is used only here. The realm user's token is written once to
+# .state/clusters/<name>/flasharray-<user>.token; -e flasharray_rotate_token=true replaces it.
+- name: FlashArray admin token is available
+  ansible.builtin.assert:
+    that: vault_flasharray_api_token is defined and vault_flasharray_api_token | length > 0
+    fail_msg: "set vault_flasharray_api_token in clusters/vault.yml"
+    quiet: true
+  no_log: true
+
+- name: FlashArray realm objects
+  module_defaults:
+    group/everpure.flasharray.everpure.flasharray:
+      fa_url: "{{ fa.endpoint }}"
+      api_token: "{{ vault_flasharray_api_token }}"
+  vars:
+    fa: "{{ c.storage.flasharray }}"
+  block:
+    - name: Realm {{ fa.realm }}
+      everpure.flasharray.purefa_realm:
+        name: "{{ fa.realm }}"
+        quota: "{{ fa.quota if fa.quota | length > 0 else omit }}"
+
+    - name: Pod {{ fa.realm }}::{{ fa.pod }}
+      everpure.flasharray.purefa_pod:
+        name: "{{ fa.pod }}"
+        realm: "{{ fa.realm }}"
+
+    - name: Policy {{ fa.policy }} ({{ fa.role }}, scoped to the realm)
+      everpure.flasharray.purefa_policy_management_access:
+        name: "{{ fa.policy }}"
+        aggregation_strategy: least-common-permissions
+        rules:
+          - role: "{{ fa.role }}"
+            scope: "{{ fa.realm }}"
+            resource_type: realms
+
+    - name: Stored token for {{ fa.user }}
+      ansible.builtin.stat:
+        path: "{{ cdir }}/flasharray-{{ fa.user }}.token"
+      register: stored_token
+
+    - name: Realm user {{ fa.user }} (no global role, member of {{ fa.policy }})
+      purefa_realm_admin:
+        fa_url: "{{ fa.endpoint }}"
+        api_token: "{{ vault_flasharray_api_token }}"
+        validate_certs: "{{ fa.validate_certs }}"
+        name: "{{ fa.user }}"
+        policies: ["{{ fa.policy }}"]
+        # A user whose token we don't hold is useless to us: rotate it (once) in that case.
+        rotate_token: "{{ flasharray_rotate_token | default(false) | bool or not stored_token.stat.exists }}"
+      register: realm_user
+      no_log: true
+
+    - name: Keep the realm user's token (only written when a new one was created)
+      ansible.builtin.copy:
+        content: "{{ realm_user.api_token }}\n"
+        dest: "{{ cdir }}/flasharray-{{ fa.user }}.token"
+        mode: "0600"
+      when: realm_user.api_token | default('') | length > 0
+      no_log: true
+
+    - name: Realm summary
+      ansible.builtin.debug:
+        msg: >-
+          realm {{ fa.realm }}{{ ' (quota ' ~ fa.quota ~ ')' if fa.quota else '' }}, pod {{ fa.realm }}::{{ fa.pod }},
+          policy {{ fa.policy }} ({{ fa.role }}), user {{ fa.user }}{{ ' (new token)' if realm_user.api_token | default('') else '' }}

@@ -112,6 +112,32 @@ identity:
     enabled: false
     users_file: ""                    # default: next to this file, <name>.htpasswd.yml (clusters/<name>.htpasswd.yml)
 
+# Persistent storage (day 2, playbooks/storage.yml): Portworx CSI (PX-CSI) on an Everpure FlashArray, with a dedicated
+# realm and a realm-scoped user for this cluster. Off by default. The nodes that run workloads (workers, or the
+# masters of a compact cluster) need NICs on the array's data networks: add them with roles.<role>.extra_networks.
+# The array-admin API token goes in clusters/vault.yml (vault_flasharray_api_token); it only creates the realm objects.
+# storage:
+#   networks:                         # static IPs on the extra NICs (NMState); no gateway, no DNS
+#     - {name: data-a, nic: 1, cidr: 198.51.100.0/24, host: same}   # nic 1 = first extra NIC; host: same = the node's
+#     - {name: data-b, nic: 2, cidr: 203.0.113.0/24, host: same}    #   host number on the machine network (or host_offset: N)
+#     #   mtu: 1500 (default)
+#   flasharray:
+#     endpoint: 192.0.2.40            # management address
+#     validate_certs: false
+#     realm: ""                       # default: the cluster name
+#     quota: ""                       # e.g. 10T (empty = no realm quota)
+#     pod: px-csi                     # pod inside the realm that holds the volumes
+#     policy: ""                      # default: <realm>-storage (role below, scoped to the realm)
+#     role: storage
+#     user: ""                        # default: <cluster name>-px (no global role; its token lands in .state/)
+#   portworx:
+#     enabled: true
+#     san_type: NVMEOF-TCP            # or ISCSI (both need networks), FC, NVMEOF-RDMA
+#     # channel: stable
+#     # operator_csv: portworx-operator.v26.4.0
+#     # image: portworx/px-pure-csi-driver:26.3.0
+#     storageclass: {name: px-fa, default: false}
+
 tools:
   tofu_version: 1.12.6
   coreos_installer_image: quay.io/coreos/coreos-installer:release

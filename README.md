@@ -162,11 +162,12 @@ VM, so apply it with `playbooks/rolling_update.yml`.
 ## Resizing nodes on a running cluster
 
 Change `memory_mb`/`cpus` (per role or per node), then run `tb ansible-playbook playbooks/rolling_update.yml -e
-cluster=<name>`. Hot-add is off, so every change power-cycles the VM. Each node in turn:
+cluster=<name>`. CPU and memory hot-add are off, so those changes power-cycle the VM. Each node in turn:
 1. Skipped if a targeted OpenTofu plan shows nothing to change.
-2. Drained (`kubernetes.core.k8s_drain`).
+2. Drained (`kubernetes.core.k8s_drain`, retried while a PodDisruptionBudget blocks it).
 3. The change is applied to that VM only.
-4. Ready again with a new `bootID`, then uncordoned.
+4. Ready again, then uncordoned. If the platform reports a new VM boot time, the node must also come back with a new
+   `bootID`. A NIC added to a running VM doesn't reboot it.
 5. Every cluster operator settled for a minute before the next node.
 
 `-e rolling_yes=true` skips the per-node prompt; `-e '{"rolling_nodes": ["worker0"]}'` limits it to some nodes.
@@ -174,7 +175,47 @@ cluster=<name>`. Hot-add is off, so every change power-cycles the VM. Each node 
 ## Optional: extra NICs
 
 `roles.worker.extra_networks` (or per node) adds NICs on more platform networks, e.g. storage. They come up with
-IPv4/IPv6 disabled; configure them afterwards (e.g. a kubernetes-nmstate `NodeNetworkConfigurationPolicy`).
+IPv4/IPv6 disabled. Give them static addresses with `storage.networks` (next section), or configure them yourself.
+On a running cluster, `playbooks/rolling_update.yml` (or `storage.yml --tags nics`) adds them one node at a time.
+
+## Optional: persistent storage (PX-CSI on FlashArray, with a dedicated realm)
+
+`playbooks/storage.yml` gives a running cluster persistent volumes from an Everpure FlashArray through Portworx CSI
+(PX-CSI). The array gets a dedicated **realm** per cluster (secure multi-tenancy). Portworx works as a realm user
+whose only access is a `storage` policy scoped to that realm. The array-admin token creates these objects and is never
+given to the cluster.
+
+Configure the `storage` section (see `cluster.example.yaml`):
+- the data NICs: `roles.<role>.extra_networks`, on the nodes that run workloads (workers, or the masters of a compact
+  cluster);
+- `storage.networks`: their static addresses. `host: same` reuses each node's host number from the machine network.
+  Check the addresses are free first;
+- `storage.flasharray`: management endpoint, realm quota, names (defaults come from the cluster name);
+- `storage.portworx.enabled: true`.
+
+Add `vault_flasharray_api_token` to `clusters/vault.yml`.
+
+Run `--check` first, then each phase, in order:
+
+```bash
+tb ansible-playbook playbooks/storage.yml -e cluster=<name> --check
+tb ansible-playbook playbooks/storage.yml -e cluster=<name> --tags nics -e rolling_yes=true
+tb ansible-playbook playbooks/storage.yml -e cluster=<name> --tags network,node,flasharray,portworx
+tb ansible-playbook playbooks/storage.yml -e cluster=<name> --tags smoke -e storage_smoke_test=true
+```
+
+| Tag | What it does |
+|---|---|
+| `nics` | adds the data NICs, one node at a time (drain, apply, Ready, uncordon) |
+| `network` | NMState operator (pinned CSV, manual approval); one `NodeNetworkConfigurationPolicy` per node. The interface is found by MAC; static IPv4, no gateway |
+| `node` | one MachineConfig per pool: Pure `multipath.conf` and udev rules, `iscsid`/`multipathd`, `nvme_tcp`, and a **unique NVMe host NQN** per node. The RHCOS image ships one NQN for every node, and the array tells hosts apart by NQN. The MCO reboots the nodes one at a time; a Pod per node then verifies |
+| `flasharray` | `everpure.flasharray` modules: realm (+quota), pod in the realm, management-access policy. Then `purefa_realm_admin` creates a user with no global role and the policy, plus its API token (kept in `.state/clusters/<name>/`, mode 0600; `-e flasharray_rotate_token=true` replaces it) |
+| `portworx` | PX-CSI operator (pinned CSV, manual approval), `px-pure-secret` with the realm user's token, `StorageCluster`, StorageClass (`pure_block`, realm pod) |
+| `smoke` | a PVC and a Pod that writes and reads it; checks the volume is in `<realm>::<pod>` on the array, then cleans up |
+
+`playbooks/status.yml` adds the storage health: policies, StorageCluster, CSI driver per node, StorageClass, and realm
+usage against its quota. Removing PX-CSI and the realm is manual for now: delete PVCs first, then the StorageCluster,
+then the realm objects on the array.
 
 ## How a node installs
 
@@ -196,11 +237,13 @@ copies `.state/` or `clusters/vault.yml`. tar doesn't delete, so remove deleted 
 ```
 compose.yaml, docker/          toolbox image (everything pinned), host networking
 ansible.cfg, inventory/        localhost; the infra host is added at run time from the cluster config
-playbooks/                     deploy, infra, users, rolling_update, status, destroy, tools/oc
+playbooks/                     deploy, infra, users, rolling_update, storage, status, destroy, tools/oc
 roles/                         cluster_model tools infra preflight ignition isos vms bootstrap csr install_complete
-                               htpasswd rolling_update status
-plugins/filter/                cluster_model (validate + derive), htpasswd (bcrypt), k8s (conditions)
-plugins/modules/               ocp_csr_approve (no upstream module approves CSRs)
+                               htpasswd rolling_update status olm_operator storage_network storage_node
+                               flasharray_realm portworx storage_smoke
+plugins/filter/                cluster_model (validate + derive), htpasswd (bcrypt), k8s (conditions, NMState)
+plugins/modules/               ocp_csr_approve (no upstream module approves CSRs), purefa_realm_admin (realm user:
+                               no module of everpure.flasharray 1.45 makes a policy-only user)
 platforms/<name>/              OpenTofu module + Ansible task files per hypervisor (contract: platforms/README.md)
 clusters/                      configs, user lists, vault (gitignored; examples tracked)
 tests/                         filter unit tests (python3 tests/filters_test.py, in the toolbox)

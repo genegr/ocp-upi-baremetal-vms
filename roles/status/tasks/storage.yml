@@ -1,0 +1,61 @@
+---
+# PX-CSI health: storage network policies, StorageCluster, CSI driver per node, StorageClass; realm usage on the array
+# (only when vault_flasharray_api_token is available).
+- name: Storage objects
+  kubernetes.core.k8s_info:
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.ns | default(omit) }}"
+  loop:
+    - {api: nmstate.io/v1, kind: NodeNetworkConfigurationPolicy}
+    - {api: core.libopenstorage.org/v1, kind: StorageCluster, ns: "{{ c.storage.portworx.namespace }}"}
+    - {api: storage.k8s.io/v1, kind: CSINode}
+    - {api: storage.k8s.io/v1, kind: StorageClass}
+  loop_control:
+    label: "{{ item.kind }}"
+  register: storage_objects
+  failed_when: false
+
+- name: Record storage
+  ansible.builtin.set_fact:
+    status_ok: >-
+      {{ status_ok
+         + (['storage network policies Available on ' ~ wanted | length ~ ' nodes'] if nncp_bad | length == 0 and wanted else [])
+         + (['StorageCluster ' ~ sc.metadata.name ~ ' ' ~ sc_phase] if sc_phase in ['Running', 'Online'] else [])
+         + (['PX-CSI driver on every storage node'] if csi_missing | length == 0 else [])
+         + (['StorageClass ' ~ c.storage.portworx.storageclass.name] if sc_class else []) }}
+    status_fail: >-
+      {{ status_fail
+         + (nncp_bad | map('regex_replace', '^', 'storage network policy not Available: ') | list)
+         + ([] if sc_phase in ['Running', 'Online'] else ['StorageCluster phase: ' ~ (sc_phase or 'missing')])
+         + (csi_missing | map('regex_replace', '^', 'PX-CSI driver not registered on ') | list)
+         + ([] if sc_class else ['StorageClass ' ~ c.storage.portworx.storageclass.name ~ ' missing']) }}
+  vars:
+    res: "{{ storage_objects.results | map(attribute='resources', default=[]) | list }}"
+    wanted: "{{ c.storage.nodes | map('regex_replace', '^', 'storage-') | list if c.storage.networks else [] }}"
+    nncp_bad: "{{ wanted | difference(res[0] | k8s_names_with_condition('Available')) }}"
+    sc: "{{ res[1] | first | default({'metadata': {'name': ''}}) }}"
+    sc_phase: "{{ sc.status.phase | default('') }}"
+    storage_hosts: "{{ c.nodes | selectattr('name', 'in', c.storage.nodes) | map(attribute='hostname') | list }}"
+    csi_missing: "{{ storage_hosts | difference(res[2] | k8s_csinodes_with_driver('pxd.portworx.com')) }}"
+    sc_class: "{{ res[3] | selectattr('metadata.name', 'eq', c.storage.portworx.storageclass.name) | list | length > 0 }}"
+
+- name: Realm on the array
+  everpure.flasharray.purefa_info:
+    fa_url: "{{ c.storage.flasharray.endpoint }}"
+    api_token: "{{ vault_flasharray_api_token }}"
+    gather_subset: [realms]
+  register: fa_realms
+  failed_when: false
+  no_log: true
+  when: vault_flasharray_api_token is defined
+
+- name: Record the realm
+  ansible.builtin.set_fact:
+    status_ok: >-
+      {{ status_ok + (['realm ' ~ c.storage.flasharray.realm ~ ': ' ~ (realm.total_used | default(0) | int | human_readable)
+         ~ ' used' ~ (', quota ' ~ (realm.quota_limit | int | human_readable) if realm.quota_limit else '')] if realm else []) }}
+    status_fail: "{{ status_fail + ([] if realm else ['realm ' ~ c.storage.flasharray.realm ~ ' not found on the array']) }}"
+  vars:
+    realm: "{{ fa_realms.purefa_info.realms[c.storage.flasharray.realm] | default({}) }}"
+  when: fa_realms.purefa_info is defined

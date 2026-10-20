@@ -123,6 +123,11 @@
     co_bad: "{{ res[2] | k8s_unhealthy_operators }}"
     pending: "{{ res[3] | k8s_pending_csrs }}"
 
+# --- Storage (PX-CSI on FlashArray, when configured) ---------------------------------------------------------
+- name: Storage
+  ansible.builtin.include_tasks: storage.yml
+  when: c.storage.portworx.enabled
+
 - name: Report
   ansible.builtin.debug:
     msg: "{{ (status_ok | map('regex_replace', '^', 'ok    ') | list)

@@ -1,0 +1,88 @@
+---
+# Install one OLM operator pinned to an exact CSV: Subscription with startingCSV + Manual approval, approve only the
+# InstallPlan that installs that CSV, wait for it to succeed. Later versions are never approved automatically.
+# Vars: olm_namespace, olm_package, olm_channel, olm_csv, olm_source (certified-operators, redhat-operators, ...),
+#       olm_target_namespaces (default [olm_namespace]; [] = all namespaces).
+# Sets olm_csv_ready: true when the CSV is Succeeded, so callers can skip their CR tasks in --check mode before the
+# operator (and its CRDs) exists.
+- name: "{{ olm_package }}: namespace {{ olm_namespace }}"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ olm_namespace }}"
+  register: olm_ns
+
+# In --check mode a namespace that doesn't exist yet can't hold the (dry-run) objects below.
+- name: "{{ olm_package }}: operator group"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: "{{ olm_package }}"
+        namespace: "{{ olm_namespace }}"
+      spec: "{{ {} if (olm_target_namespaces | default([olm_namespace])) | length == 0
+                else {'targetNamespaces': olm_target_namespaces | default([olm_namespace])} }}"
+  when: not (ansible_check_mode and olm_ns is changed)
+
+- name: "{{ olm_package }}: subscription pinned to {{ olm_csv }}"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: "{{ olm_package }}"
+        namespace: "{{ olm_namespace }}"
+      spec:
+        name: "{{ olm_package }}"
+        channel: "{{ olm_channel }}"
+        source: "{{ olm_source }}"
+        sourceNamespace: openshift-marketplace
+        startingCSV: "{{ olm_csv }}"
+        installPlanApproval: Manual
+  when: not (ansible_check_mode and olm_ns is changed)
+
+- name: "{{ olm_package }}: install plan for {{ olm_csv }}"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ olm_namespace }}"
+  register: install_plans
+  until: install_plans.resources | selectattr('spec.clusterServiceVersionNames', 'contains', olm_csv) | list | length > 0
+  retries: 30
+  delay: 10
+  when: not ansible_check_mode
+
+- name: "{{ olm_package }}: approve that install plan only"
+  kubernetes.core.k8s:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ olm_namespace }}"
+    state: patched
+    definition:
+      spec:
+        approved: true
+  loop: "{{ install_plans.resources | default([]) | selectattr('spec.clusterServiceVersionNames', 'contains', olm_csv)
+            | rejectattr('spec.approved') | list }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+
+- name: "{{ olm_package }}: {{ olm_csv }} Succeeded"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ olm_namespace }}"
+    name: "{{ olm_csv }}"
+  register: olm_csv_info
+  when: not (ansible_check_mode and olm_ns is changed)
+  until: ansible_check_mode or (olm_csv_info.resources | default([]) | map(attribute='status.phase') | first | default('')) == 'Succeeded'
+  retries: 60
+  delay: 10
+
+- name: "{{ olm_package }}: ready"
+  ansible.builtin.set_fact:
+    olm_csv_ready: >-
+      {{ (olm_csv_info.resources | default([]) | map(attribute='status.phase') | first | default('')) == 'Succeeded' }}

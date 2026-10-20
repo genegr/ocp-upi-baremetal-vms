@@ -74,7 +74,7 @@ after the cluster (folder, ISO directory, VM names within it) so that two cluste
 | `credentials.yml` | read credentials (vault vars or environment), assert they're set, set `platform_env` (the `TF_VAR_*` dict) |
 | `preflight.yml` | check every platform object the module references exists (info modules); append messages to `preflight_failures` |
 | `post_apply.yml` | anything the provider can't do, run after a successful apply (`tofu_result` in scope), e.g. vSphere boot order |
-| `vm_state.yml` | set `vm_state: {<node>: {power: on\|off, nested: bool}}`; nodes without a VM are absent |
+| `vm_state.yml` | set `vm_state: {<node>: {power: on\|off, nested: bool, boot_time: str}}` for all nodes, or for the names in `vm_state_nodes`; nodes without a VM are absent. `boot_time` (last power-on, `""` if unknown) tells `rolling_update` whether a change really power-cycled the VM |
 | `console.yml` | optional: screenshot of `console_node` into the cluster's state dir |
 
 `vm_address.j2` renders the OpenTofu address of a node's VM from `node`. `rolling_update` uses it for targeted applies.

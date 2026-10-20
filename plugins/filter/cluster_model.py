@@ -82,6 +82,30 @@ DEFAULTS = {
         "tofu_version": "1.12.6",
         "coreos_installer_image": "quay.io/coreos/coreos-installer:release",
     },
+    # Day-2 persistent storage (playbooks/storage.yml): node storage networks (NMState, static IPs on extra NICs),
+    # a dedicated FlashArray realm + user, and Portworx CSI (PX-CSI). All opt-in.
+    "storage": {
+        "networks": [],
+        "flasharray": {
+            "endpoint": "",
+            "validate_certs": False,
+            "realm": "",          # default: the cluster name
+            "quota": "",          # e.g. 10T
+            "pod": "px-csi",
+            "policy": "",         # default: <realm>-storage
+            "role": "storage",    # role granted by the policy, scoped to the realm
+            "user": "",           # default: <cluster>-px
+        },
+        "portworx": {
+            "enabled": False,
+            "channel": "stable",
+            "operator_csv": "portworx-operator.v26.4.0",
+            "image": "portworx/px-pure-csi-driver:26.3.0",
+            "san_type": "NVMEOF-TCP",
+            "namespace": "portworx",
+            "storageclass": {"name": "px-fa", "default": False},
+        },
+    },
 }
 
 # Hypervisor-specific rules; everything else here is platform-neutral. A new platform needs an entry here (its
@@ -285,7 +309,72 @@ def cluster_model(raw, config_path):
                                                          os.path.expanduser(htp["users_file"])))
     else:
         htp["users_file"] = re.sub(r"\.ya?ml$", "", config_abs) + ".htpasswd.yml"
+
+    _storage(c, nodes, net)
     return c
+
+
+def _storage(c, nodes, net):
+    """Validate the storage section and derive each node's static storage addresses."""
+    st = c["storage"]
+    taken = {n["ip"] for n in nodes} | {net["api_vip"], net["ingress_vip"], net["gateway"]} | set(net["dns_servers"])
+    for n in nodes:
+        n["storage"] = []
+    seen_names = set()
+    for sn in st["networks"]:
+        for key in ("name", "nic", "cidr"):
+            if sn.get(key) in (None, ""):
+                _die(f"storage.networks entry {sn}: missing '{key}'")
+        if sn["name"] in seen_names:
+            _die(f"storage network {sn['name']} defined twice")
+        seen_names.add(sn["name"])
+        try:
+            scidr = ipaddress.ip_network(sn["cidr"], strict=True)
+        except ValueError as exc:
+            _die(f"storage network {sn['name']}: {exc}")
+        sn.setdefault("mtu", 1500)
+        host = sn.get("host", "same")
+        if host != "same" and "host_offset" not in sn:
+            _die(f"storage network {sn['name']}: host must be 'same' or set host_offset")
+        # Storage IPs go on the nodes that run workloads: workers, or the masters of a compact cluster.
+        for n in nodes:
+            if n["role"] == "bootstrap" or (n["role"] == "master" and not c["cluster"]["masters_schedulable"]):
+                continue
+            if not 0 < int(sn["nic"]) < len(n["nics"]):
+                _die(f"storage network {sn['name']}: node {n['name']} has no NIC {sn['nic']} "
+                     f"(add roles.{n['role']}.extra_networks)")
+            hostnum = int(ipaddress.ip_address(n["ip"])) - int(ipaddress.ip_network(net["cidr"]).network_address)
+            if host != "same":
+                hostnum = int(sn["host_offset"]) + nodes.index(n)
+            addr = ipaddress.ip_address(int(scidr.network_address) + hostnum)
+            if addr not in scidr or addr in (scidr.network_address, scidr.broadcast_address):
+                _die(f"storage network {sn['name']}: {addr} for {n['name']} is not a usable host in {scidr}")
+            if str(addr) in taken:
+                _die(f"storage network {sn['name']}: {addr} for {n['name']} collides with another address")
+            taken.add(str(addr))
+            n["storage"].append({"name": sn["name"], "mac": n["nics"][int(sn["nic"])]["mac"],
+                                 "address": str(addr), "prefix": scidr.prefixlen, "mtu": int(sn["mtu"])})
+
+    # MachineConfigPools of the nodes that run workloads (they get the multipath/udev MachineConfig).
+    has_workers = any(n["role"] == "worker" for n in nodes)
+    st["mc_roles"] = (["master"] if c["cluster"]["masters_schedulable"] else []) + (["worker"] if has_workers else [])
+    st["nodes"] = [n["name"] for n in nodes if n["storage"]]
+
+    fa = st["flasharray"]
+    fa["realm"] = fa["realm"] or c["cluster"]["name"]
+    fa["policy"] = fa["policy"] or f"{fa['realm']}-storage"
+    fa["user"] = fa["user"] or f"{c['cluster']['name']}-px"
+    for key in ("realm", "pod", "policy", "user"):
+        if not re.match(r"^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$", str(fa[key])):
+            _die(f"storage.flasharray.{key} '{fa[key]}' must be letters, digits and '-'")
+    px = st["portworx"]
+    if px["enabled"]:
+        if not fa["endpoint"]:
+            _die("storage.portworx.enabled needs storage.flasharray.endpoint")
+        if px["san_type"] not in ("NVMEOF-TCP", "ISCSI", "FC", "NVMEOF-RDMA"):
+            _die("storage.portworx.san_type must be NVMEOF-TCP, ISCSI, FC or NVMEOF-RDMA")
+        if px["san_type"] in ("NVMEOF-TCP", "ISCSI") and not st["networks"]:
+            _die(f"storage.portworx.san_type {px['san_type']} needs storage.networks (nodes need a data path)")
 
 
 def haproxy_pools(csv_text):

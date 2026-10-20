@@ -1,0 +1,18 @@
+# Managed by ocp-upi (storage_node MachineConfig).
+# The RHCOS image ships one /etc/nvme/hostnqn + hostid for every node, but the array tells hosts apart by NQN.
+# Derive both from this machine's SMBIOS UUID, once: the marker in /var survives reboots and updates.
+# Ordering: only Before=kubelet (PX-CSI connects NVMe targets from its Pods). Never order this against multipathd or
+# other early-boot units: multipathd runs before local-fs-pre.target, so "Before=multipathd" plus the default
+# After=sysinit.target is an ordering cycle, and the job systemd drops to break it can leave the node without network.
+[Unit]
+Description=Unique NVMe host NQN and host ID for this node
+ConditionPathExists=!/var/lib/nvme-unique-hostnqn.done
+Before=kubelet.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/sh -c 'u=$$(tr "[:upper:]" "[:lower:]" < /sys/class/dmi/id/product_uuid) && [ -n "$$u" ] && echo "nqn.2014-08.org.nvmexpress:uuid:$$u" > /etc/nvme/hostnqn && echo "$$u" > /etc/nvme/hostid && touch /var/lib/nvme-unique-hostnqn.done'
+
+[Install]
+WantedBy=multi-user.target

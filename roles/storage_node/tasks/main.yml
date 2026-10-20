@@ -1,0 +1,67 @@
+---
+# Node prerequisites for PX-CSI on FlashArray, as one MachineConfig per pool that runs workloads (storage.mc_roles):
+# /etc/multipath.conf + udev rules (vendor settings), iscsid/multipathd enabled, nvme_tcp loaded at boot, and a unique
+# NVMe host NQN per node. RHCOS's native NVMe multipath stays on (PX-CSI supports it). The MCO applies it with a
+# rolling reboot, one node at a time.
+- name: Pure storage MachineConfig per pool
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: machineconfiguration.openshift.io/v1
+      kind: MachineConfig
+      metadata:
+        name: "99-{{ item }}-pure-storage"
+        labels:
+          machineconfiguration.openshift.io/role: "{{ item }}"
+          app.kubernetes.io/managed-by: ocp-upi
+      spec:
+        config:
+          ignition:
+            version: 3.2.0
+          storage:
+            files:
+              - path: /etc/multipath.conf
+                mode: 420
+                overwrite: true
+                contents:
+                  source: "data:text/plain;charset=utf-8;base64,{{ lookup('ansible.builtin.file', 'multipath.conf') | b64encode }}"
+              - path: /etc/udev/rules.d/99-pure-storage.rules
+                mode: 420
+                overwrite: true
+                contents:
+                  source: "data:text/plain;charset=utf-8;base64,{{ lookup('ansible.builtin.file', '99-pure-storage.rules') | b64encode }}"
+              - path: /etc/modules-load.d/nvme_tcp.conf
+                mode: 420
+                overwrite: true
+                contents:
+                  source: "data:text/plain;charset=utf-8;base64,{{ 'nvme_tcp\n' | b64encode }}"
+          systemd:
+            units:
+              - name: nvme-unique-hostnqn.service
+                enabled: true
+                contents: "{{ lookup('ansible.builtin.file', 'nvme-unique-hostnqn.service') }}"
+              - name: iscsid.service
+                enabled: true
+              - name: multipathd.service
+                enabled: true
+  loop: "{{ c.storage.mc_roles }}"
+
+- name: Pools rolled out (the MCO reboots one node at a time)
+  kubernetes.core.k8s_info:
+    api_version: machineconfiguration.openshift.io/v1
+    kind: MachineConfigPool
+    name: "{{ item }}"
+  register: mcp
+  until: >-
+    mcp.resources | length == 1
+    and ('99-' ~ item ~ '-pure-storage') in (mcp.resources[0].status.configuration.source | default([]) | map(attribute='name'))
+    and mcp.resources[0] | k8s_condition('Updated') == 'True'
+    and mcp.resources[0].status.updatedMachineCount | default(0) == mcp.resources[0].status.machineCount | default(-1)
+  retries: 180
+  delay: 20
+  loop: "{{ c.storage.mc_roles }}"
+  when: not ansible_check_mode
+
+# Verify on the nodes themselves: one short-lived Pod per node reads the host's NQN and service state.
+- name: Node check
+  ansible.builtin.include_tasks: verify.yml
+  when: not ansible_check_mode

@@ -1,0 +1,4 @@
+---
+nmstate_channel: stable
+nmstate_csv: kubernetes-nmstate-operator.4.22.0-202609301304
+nmstate_namespace: openshift-nmstate

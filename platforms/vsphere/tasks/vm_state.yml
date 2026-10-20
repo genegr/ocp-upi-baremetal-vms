@@ -1,6 +1,7 @@
 ---
-# Power state and nested-virtualization flag of every node VM.
-# Sets vm_state: {<node>: {"power": "on"|"off", "nested": true|false}}; nodes without a VM are absent from it.
+# Power state, nested-virtualization flag and last power-on time of every node VM (or of vm_state_nodes, a list of
+# node names). Sets vm_state: {<node>: {"power": "on"|"off", "nested": true|false, "boot_time": "<ISO time>"|""}};
+# nodes without a VM are absent from it.
 - name: VM properties
   community.vmware.vmware_guest_info:
     hostname: "{{ c.vsphere.server }}"
@@ -11,8 +12,8 @@
     folder: "/{{ c.vsphere.datacenter }}/vm/{{ c.vsphere.folder }}"
     name: "{{ item.name }}"
     schema: vsphere
-    properties: [runtime.powerState, config.nestedHVEnabled]
-  loop: "{{ c.nodes }}"
+    properties: [runtime.powerState, runtime.bootTime, config.nestedHVEnabled]
+  loop: "{{ c.nodes if vm_state_nodes is not defined else c.nodes | selectattr('name', 'in', vm_state_nodes) | list }}"
   loop_control:
     label: "{{ item.name }}"
   register: vs_vms
@@ -23,7 +24,8 @@
     vm_state: >-
       {{ vm_state | default({}) | combine({item.item.name: {
            'power': 'on' if item.instance.runtime.powerState == 'poweredOn' else 'off',
-           'nested': item.instance.config.nestedHVEnabled | bool}}) }}
+           'nested': item.instance.config.nestedHVEnabled | bool,
+           'boot_time': item.instance.runtime.bootTime | default('', true) | string}}) }}
   loop: "{{ vs_vms.results | selectattr('instance', 'defined') | list }}"
   loop_control:
     label: "{{ item.item.name }}"

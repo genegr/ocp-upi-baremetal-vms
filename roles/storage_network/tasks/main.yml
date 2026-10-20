@@ -1,0 +1,84 @@
+---
+# Static storage IPs on the nodes' extra NICs (storage.networks), with the kubernetes-nmstate operator.
+# One NodeNetworkConfigurationPolicy per node: its interface names are looked up by MAC in NodeNetworkState, so the
+# result doesn't depend on how hot-plugged NICs got named.
+- name: NMState operator
+  ansible.builtin.include_role:
+    name: olm_operator
+  vars:
+    olm_namespace: "{{ nmstate_namespace }}"
+    olm_package: kubernetes-nmstate-operator
+    olm_channel: "{{ nmstate_channel }}"
+    olm_csv: "{{ nmstate_csv }}"
+    olm_source: redhat-operators
+
+- name: NMState instance
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: nmstate.io/v1
+      kind: NMState
+      metadata:
+        name: nmstate
+  when: not ansible_check_mode or olm_csv_ready
+
+- name: Node network state of every storage node
+  kubernetes.core.k8s_info:
+    api_version: nmstate.io/v1beta1
+    kind: NodeNetworkState
+    name: "{{ item.hostname }}"
+  register: nns
+  until: nns.resources | default([]) | length == 1
+  retries: 30
+  delay: 10
+  loop: "{{ storage_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: not ansible_check_mode or olm_csv_ready
+
+- name: Current storage policies
+  kubernetes.core.k8s_info:
+    api_version: nmstate.io/v1
+    kind: NodeNetworkConfigurationPolicy
+    label_selectors: [app.kubernetes.io/managed-by=ocp-upi]
+  register: nncp_now
+  when: not ansible_check_mode or olm_csv_ready
+
+# Applied only when the spec differs: NMState's mutating webhook stamps a new timestamp annotation on every update,
+# so an unconditional apply would never be idempotent (and would make the handler reconcile each time).
+- name: Storage network policy per node
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: nmstate.io/v1
+      kind: NodeNetworkConfigurationPolicy
+      metadata:
+        name: "storage-{{ item.item.name }}"
+        labels:
+          app.kubernetes.io/managed-by: ocp-upi
+      spec: "{{ nncp_spec }}"
+  vars:
+    nncp_spec:
+      nodeSelector:
+        kubernetes.io/hostname: "{{ item.item.hostname }}"
+      desiredState:
+        interfaces: "{{ item.item.storage | nmstate_storage_interfaces(item.resources[0] | nns_ifaces_by_mac) }}"
+    nncp_have: >-
+      {{ nncp_now.resources | default([]) | selectattr('metadata.name', 'eq', 'storage-' ~ item.item.name)
+         | map(attribute='spec') | first | default({}) }}
+  when: nncp_have != nncp_spec
+  loop: "{{ nns.results | default([]) | selectattr('resources', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Every policy is applied
+  kubernetes.core.k8s_info:
+    api_version: nmstate.io/v1
+    kind: NodeNetworkConfigurationPolicy
+    name: "storage-{{ item.name }}"
+  register: nncp
+  until: nncp.resources | default([]) | length == 1 and nncp.resources[0] | k8s_condition('Available') == 'True'
+  retries: 30
+  delay: 10
+  loop: "{{ storage_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: not ansible_check_mode

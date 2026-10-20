@@ -1,0 +1,114 @@
+---
+# One short-lived Pod per storage node (the release's own tools image, read-only host mounts) reports the host's NVMe
+# NQN, whether the MachineConfig files are in place and whether nvme_tcp is loaded. Verification only: the Pods are
+# created and removed on every run, so these tasks never report a change.
+- name: Tools image of this release
+  kubernetes.core.k8s_info:
+    api_version: image.openshift.io/v1
+    kind: ImageStreamTag
+    namespace: openshift
+    name: tools:latest
+  register: tools_ist
+
+- name: Check namespace
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ storage_check_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: ocp-upi
+          pod-security.kubernetes.io/enforce: privileged
+          security.openshift.io/scc.podSecurityLabelSync: "false"
+
+- name: No check Pods left from an interrupted run
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ storage_check_namespace }}"
+    name: "storage-check-{{ item.name }}"
+    state: absent
+    wait: true
+  loop: "{{ storage_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+
+- name: Check Pod per node
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: "storage-check-{{ item.name }}"
+        namespace: "{{ storage_check_namespace }}"
+      spec:
+        nodeName: "{{ item.hostname }}"
+        restartPolicy: Never
+        tolerations: [{operator: Exists}]
+        containers:
+          - name: check
+            image: "{{ tools_ist.resources[0].image.dockerImageReference }}"
+            command: [sh, -c]
+            args:
+              - >-
+                echo "hostnqn=$(cat /host/etc/nvme/hostnqn)";
+                echo "multipath_conf=$(test -s /host/etc/multipath.conf && echo yes || echo no)";
+                echo "udev_rules=$(test -s /host/etc/udev/rules.d/99-pure-storage.rules && echo yes || echo no)";
+                echo "nvme_tcp=$(test -d /sys/module/nvme_tcp && echo yes || echo no)"
+            securityContext:
+              privileged: true
+            volumeMounts:
+              - {name: etc, mountPath: /host/etc, readOnly: true}
+        volumes:
+          - {name: etc, hostPath: {path: /etc}}
+    wait: true
+    wait_condition:
+      type: Ready
+      status: "False"
+      reason: PodCompleted
+    wait_timeout: 300
+  loop: "{{ storage_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+
+- name: Check output
+  kubernetes.core.k8s_log:
+    namespace: "{{ storage_check_namespace }}"
+    name: "storage-check-{{ item.name }}"
+  register: check_log
+  loop: "{{ storage_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Remove the check Pods
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ storage_check_namespace }}"
+    name: "storage-check-{{ item.name }}"
+    state: absent
+    wait: true
+  loop: "{{ storage_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+
+- name: Node storage facts
+  ansible.builtin.set_fact:
+    storage_node_facts: >-
+      {{ dict(storage_nodes | map(attribute='name') | zip(check_log.results | map(attribute='log_lines') | map('kv_lines'))) }}
+
+- name: Every node is ready for PX-CSI (unique NVMe host NQN, multipath + udev config, nvme_tcp)
+  ansible.builtin.assert:
+    that:
+      - storage_node_facts.values() | map(attribute='hostnqn') | unique | length == storage_nodes | length
+      - storage_node_facts.values() | map(attribute='hostnqn') | select('match', '^nqn\.') | list | length == storage_nodes | length
+      - storage_node_facts.values() | map(attribute='multipath_conf') | unique == ['yes']
+      - storage_node_facts.values() | map(attribute='udev_rules') | unique == ['yes']
+      - storage_node_facts.values() | map(attribute='nvme_tcp') | unique == ['yes']
+    fail_msg: "{{ storage_node_facts | to_json }}"
+    success_msg: "{{ storage_node_facts | dict2items | map(attribute='key')
+                     | zip(storage_node_facts.values() | map(attribute='hostnqn')) | map('join', ' ') | list }}"

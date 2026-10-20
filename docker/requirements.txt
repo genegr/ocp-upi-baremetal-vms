@@ -1,5 +1,6 @@
 # Python packages in the toolbox image. Pinned; releases published on or before 2026-09-30.
 ansible-core==2.21.4
+py-pure-client==1.94.2   # everpure.flasharray modules, purefa_realm_admin
 kubernetes==36.0.3       # kubernetes.core modules, ocp_csr_approve
 cryptography==50.0.2     # ocp_csr_approve (CSR subject check), community.crypto
 pyvmomi==9.1.1.0         # community.vmware modules (platform: vsphere)

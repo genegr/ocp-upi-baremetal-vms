@@ -11,7 +11,9 @@ sys.path.insert(0, os.path.join(HERE, "..", "plugins", "filter"))
 from ansible.errors import AnsibleFilterError  # noqa: E402
 from cluster_model import cluster_model, haproxy_pools  # noqa: E402
 from htpasswd import htpasswd_bindings, htpasswd_render  # noqa: E402
-from k8s import k8s_condition, k8s_node_readiness, k8s_pending_csrs, k8s_unhealthy_operators  # noqa: E402
+from k8s import (k8s_condition, k8s_node_readiness, k8s_pending_csrs, k8s_unhealthy_operators,  # noqa: E402
+                 k8s_csinodes_with_driver, k8s_names_with_condition, kv_lines, nmstate_storage_interfaces,
+                 nns_ifaces_by_mac)
 
 EXAMPLE = os.path.join(HERE, "..", "cluster.example.yaml")
 failures = []
@@ -77,6 +79,42 @@ rejects("duplicate IP", bad, "duplicate ip")
 bad = copy.deepcopy(base); bad["network"]["api_vip"] = "198.51.100.3"
 rejects("VIP outside the machine network", bad, "outside")
 
+# --- storage ------------------------------------------------------------------------------------------------------
+st = copy.deepcopy(compact)
+st["roles"]["master"]["extra_networks"] = ["Storage A", "Storage B"]
+st["storage"] = {
+    "networks": [{"name": "nvme-a", "nic": 1, "cidr": "198.51.100.0/24", "host": "same"},
+                 {"name": "nvme-b", "nic": 2, "cidr": "203.0.113.0/24", "host": "same", "mtu": 9000}],
+    "flasharray": {"endpoint": "192.0.2.200", "quota": "10T"},
+    "portworx": {"enabled": True},
+}
+cs = cluster_model(st, EXAMPLE)
+m0 = next(n for n in cs["nodes"] if n["name"] == "master0")
+check("storage: host: same mirrors the machine-net host number",
+      [(s["name"], s["address"], s["prefix"], s["mtu"]) for s in m0["storage"]]
+      == [("nvme-a", "198.51.100.51", 24, 1500), ("nvme-b", "203.0.113.51", 24, 9000)])
+check("storage: bound to the extra NICs by MAC", [s["mac"] for s in m0["storage"]] == [m0["nics"][1]["mac"], m0["nics"][2]["mac"]])
+check("storage: no addresses on the bootstrap", next(n for n in cs["nodes"] if n["role"] == "bootstrap")["storage"] == [])
+fa = cs["storage"]["flasharray"]
+check("storage: realm/policy/user defaults from the cluster name",
+      (fa["realm"], fa["policy"], fa["user"]) == ("ocp4", "ocp4-storage", "ocp4-px"))
+std = copy.deepcopy(st); std["nodes"] = base["nodes"]; std["roles"]["worker"]["extra_networks"] = ["Storage A", "Storage B"]
+csd = cluster_model(std, EXAMPLE)
+check("storage: standard topology puts storage IPs on workers only",
+      [n["name"] for n in csd["nodes"] if n["storage"]] == ["worker0", "worker1", "worker2"])
+check("storage: MachineConfig pools follow the workload nodes",
+      (cs["storage"]["mc_roles"], csd["storage"]["mc_roles"]) == (["master"], ["worker"]))
+check("storage: storage node list", cs["storage"]["nodes"] == ["master0", "master1", "master2"])
+
+bad = copy.deepcopy(st); bad["storage"]["networks"][0]["nic"] = 3
+rejects("storage: NIC index beyond the node's NICs", bad, "has no NIC 3")
+bad = copy.deepcopy(st); bad["storage"]["networks"][0]["cidr"] = base["network"]["cidr"]
+rejects("storage: address colliding with a node IP", bad, "collides")
+bad = copy.deepcopy(st); bad["storage"]["networks"] = []
+rejects("storage: NVMe/TCP without storage networks", bad, "needs storage.networks")
+bad = copy.deepcopy(st); bad["storage"]["flasharray"]["endpoint"] = ""
+rejects("storage: portworx without a FlashArray endpoint", bad, "needs storage.flasharray.endpoint")
+
 # --- haproxy_pools ------------------------------------------------------------------------------------------------
 csv = "\n".join([
     "# pxname,svname," + ",".join(f"f{i}" for i in range(2, 18)) + ",status",
@@ -110,6 +148,27 @@ check("k8s_unhealthy_operators", k8s_unhealthy_operators([obj("a", Available="Tr
                                                           obj("c", Available="True", Degraded="True")]) == ["b", "c"])
 check("k8s_pending_csrs", k8s_pending_csrs([{"metadata": {"name": "p"}, "status": {}},
                                             {"metadata": {"name": "a"}, "status": {"conditions": [{"type": "Approved"}]}}]) == ["p"])
+check("kv_lines", kv_lines(["a=1", "noise", "b=x=y"]) == {"a": "1", "b": "x=y"})
+check("k8s_names_with_condition", k8s_names_with_condition([obj("p1", Available="True"), obj("p2", Available="False"),
+                                                            {"metadata": {"name": "p3"}}], "Available") == ["p1"])
+csinodes = [{"metadata": {"name": "n1"}, "spec": {"drivers": [{"name": "pxd.portworx.com"}]}},
+            {"metadata": {"name": "n2"}, "spec": {"drivers": None}}]
+check("k8s_csinodes_with_driver", k8s_csinodes_with_driver(csinodes, "pxd.portworx.com") == ["n1"])
+nns = {"status": {"currentState": {"interfaces": [{"name": "ens33", "mac-address": "00:50:56:01:42:51"},
+                                                  {"name": "ens34", "mac-address": "00:50:56:02:42:51"},
+                                                  {"name": "br-ex", "type": "ovs-interface"}]}}}
+by_mac = nns_ifaces_by_mac(nns)
+check("nns_ifaces_by_mac", by_mac == {"00:50:56:01:42:51": "ens33", "00:50:56:02:42:51": "ens34"})
+ifs = nmstate_storage_interfaces([m0["storage"][0] | {"mac": "00:50:56:02:42:51"}], by_mac)
+check("nmstate_storage_interfaces: static IPv4 on the NIC found by MAC, no IPv6",
+      ifs == [{"name": "ens34", "type": "ethernet", "state": "up", "mtu": 1500,
+               "ipv4": {"enabled": True, "dhcp": False, "address": [{"ip": "198.51.100.51", "prefix-length": 24}]},
+               "ipv6": {"enabled": False}}])
+try:
+    nmstate_storage_interfaces([m0["storage"][0] | {"mac": "00:50:56:09:09:09"}], by_mac)
+    check("nmstate_storage_interfaces: unknown MAC rejected", False)
+except AnsibleFilterError:
+    check("nmstate_storage_interfaces: unknown MAC rejected", True)
 
 print(f"\n{'FAILED: ' + ', '.join(failures) if failures else 'all tests passed'}")
 sys.exit(1 if failures else 0)

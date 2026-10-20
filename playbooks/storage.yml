@@ -1,0 +1,85 @@
+---
+# Day-2 persistent storage: Portworx CSI (PX-CSI) on Everpure FlashArray, with a dedicated realm + user per cluster.
+# Phases (tags), in order; each is idempotent, run --check first:
+#   nics       add the storage NICs (roles.<role>.extra_networks) one node at a time (rolling_update)
+#   network    NMState operator + static storage IPs on those NICs (storage.networks)
+#   node       MachineConfig: multipath/udev, iscsid/multipathd, nvme_tcp, unique NVMe host NQN (rolling reboot)
+#   flasharray realm (+quota), pod, management-access policy, realm user + API token (needs vault_flasharray_api_token)
+#   portworx   PX-CSI operator (pinned), px-pure-secret, StorageCluster, StorageClass
+#   smoke      opt-in end-to-end check: -e storage_smoke_test=true
+#   ansible-playbook playbooks/storage.yml -e cluster=<name> [--tags network] [-e rolling_yes=true]
+- name: Cluster model
+  hosts: localhost
+  gather_facts: false
+  tags: always
+  roles:
+    - cluster_model
+  tasks:
+    - name: Storage is configured for this cluster
+      ansible.builtin.assert:
+        that: c.storage.portworx.enabled or c.storage.networks | length > 0
+        fail_msg: "{{ cluster }} has no storage section (storage.networks / storage.portworx.enabled)"
+        quiet: true
+
+- name: Storage NICs
+  hosts: localhost
+  gather_facts: false
+  tags: nics
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+  roles:
+    - role: rolling_update
+      vars:
+        rolling_nodes: "{{ c.storage.nodes }}"
+
+- name: Storage
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+  vars:
+    storage_nodes: "{{ c.nodes | selectattr('name', 'in', c.storage.nodes) | list }}"
+    fa: "{{ c.storage.flasharray }}"
+    px: "{{ c.storage.portworx }}"
+  tasks:
+    - name: Storage network
+      ansible.builtin.include_role:
+        name: storage_network
+        apply:
+          tags: network
+      tags: network
+      when: c.storage.networks | length > 0
+
+    - name: Node prerequisites
+      ansible.builtin.include_role:
+        name: storage_node
+        apply:
+          tags: node
+      tags: node
+      when: px.enabled
+
+    - name: FlashArray realm
+      ansible.builtin.include_role:
+        name: flasharray_realm
+        apply:
+          tags: flasharray
+      tags: flasharray
+      when: px.enabled
+
+    - name: Portworx CSI
+      ansible.builtin.include_role:
+        name: portworx
+        apply:
+          tags: portworx
+      tags: portworx
+      when: px.enabled
+
+    - name: Smoke test
+      ansible.builtin.include_role:
+        name: storage_smoke
+        apply:
+          tags: smoke
+      tags: smoke
+      when: px.enabled and storage_smoke_test | default(false) | bool

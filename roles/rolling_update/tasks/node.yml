@@ -32,6 +32,15 @@
         name: "{{ rnode.hostname }}"
       register: before
 
+    - name: "{{ node_name }}: VM boot time before"
+      ansible.builtin.include_tasks: "{{ platform_dir }}/tasks/vm_state.yml"
+      vars:
+        vm_state_nodes: ["{{ node_name }}"]
+
+    - name: "{{ node_name }}: remember it"
+      ansible.builtin.set_fact:
+        boot_time_before: "{{ vm_state[node_name].boot_time }}"
+
     - name: "{{ node_name }}: drain"
       kubernetes.core.k8s_drain:
         name: "{{ rnode.hostname }}"
@@ -39,7 +48,16 @@
         delete_options:
           ignore_daemonsets: true
           delete_emptydir_data: true
+          # Masters run unmanaged static-pod guard Pods (etcd-guard, kube-apiserver-guard, ...); their operators
+          # recreate them, and the MCO's own drain removes them the same way.
+          force: true
           wait_timeout: 900
+      # A PodDisruptionBudget can block an eviction for a while (a Pod moved by the previous node's drain that isn't
+      # Ready yet): retry, as oc adm drain does.
+      register: drained
+      until: drained is succeeded
+      retries: 20
+      delay: 30
 
     - name: "{{ node_name }}: apply the change (power cycle)"
       ansible.builtin.include_role:
@@ -47,14 +65,22 @@
       vars:
         vms_targets: ["{{ rtarget }}"]
 
-    - name: "{{ node_name }}: back Ready after a real reboot"
+    # Some changes (a new NIC, more CPUs with hot-add) apply to the running VM: the platform's boot time tells whether
+    # the VM really was power-cycled, and only then must the node come back with a new boot ID.
+    - name: "{{ node_name }}: VM boot time after"
+      ansible.builtin.include_tasks: "{{ platform_dir }}/tasks/vm_state.yml"
+      vars:
+        vm_state_nodes: ["{{ node_name }}"]
+
+    - name: "{{ node_name }}: back Ready (after a reboot if the VM was power-cycled)"
       kubernetes.core.k8s_info:
         kind: Node
         name: "{{ rnode.hostname }}"
       register: after
       until: >-
         after.resources | default([]) | length == 1
-        and after.resources[0].status.nodeInfo.bootID != before.resources[0].status.nodeInfo.bootID
+        and (vm_state[node_name].boot_time == boot_time_before
+             or after.resources[0].status.nodeInfo.bootID != before.resources[0].status.nodeInfo.bootID)
         and after.resources[0] | k8s_condition('Ready') == 'True'
       retries: 120
       delay: 15
