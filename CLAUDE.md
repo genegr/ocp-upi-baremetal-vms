@@ -103,6 +103,10 @@ clusters/                      <name>.yaml, <name>.htpasswd.yml, vault.yml (giti
   Use the policy-members endpoints, adding before removing. A role user is a member of the built-in policy named
   after the role; a role patch on a policy-only user fails with "User is not a role user".
 - `module_defaults` group for the Pure modules: `group/everpure.flasharray.everpure.flasharray`.
+- **`purefa_info` `volumes` (also `purefa_volume`, `purefa_vg`) fails on Purity//FA 6.12** when any volume on the
+  array has no priority adjustment (`AttributeError`; Everpure-Ansible/FlashArray-Collection#1103). The fix, #1105, is
+  on master after 1.46.0. Until a pinned release has it, `storage_smoke` checks the realm pod's provisioned space
+  (`pods` subset), not the volume list.
 
 ## Skills
 `.claude/skills/`: `ocp-upi-deploy`, `ocp-upi-infra`, `ocp-upi-status`, `ocp-upi-storage`, `ocp-upi-teardown`.

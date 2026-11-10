@@ -1,109 +1,128 @@
 ---
 # End-to-end check (opt-in, -e storage_smoke_test=true): a PVC from the PX-CSI StorageClass, a Pod that writes and
-# reads it, the volume found inside the realm pod on the array, then everything removed.
-- name: Smoke-test namespace
-  kubernetes.core.k8s:
-    definition:
-      apiVersion: v1
-      kind: Namespace
-      metadata:
+# reads it, and the realm pod on the array growing by the PVC's size. Everything is removed afterwards, also when a
+# check fails.
+# The array side reads the realm pod's provisioned space (purefa_info "pods"), not the volume list: purefa_info
+# "volumes" fails on Purity//FA 6.12 when a volume has no priority adjustment (Everpure-Ansible/FlashArray-Collection
+# #1103, fixed by #1105 after 1.46.0). With a pinned release that has #1105, the volume itself can be looked up again.
+- name: Smoke test
+  block:
+    - name: Realm pod before the test
+      everpure.flasharray.purefa_info:
+        fa_url: "{{ fa.endpoint }}"
+        api_token: "{{ vault_flasharray_api_token }}"
+        gather_subset: [pods]
+      register: fa_before
+      no_log: true
+
+    - name: Smoke-test namespace
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ smoke_namespace }}"
+
+    - name: PVC
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: px-smoke
+            namespace: "{{ smoke_namespace }}"
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: "{{ px.storageclass.name }}"
+            resources:
+              requests:
+                storage: "{{ smoke_size_gib }}Gi"
+
+    - name: PVC bound
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: "{{ smoke_namespace }}"
+        name: px-smoke
+      register: pvc
+      until: (pvc.resources[0].status.phase | default('')) == 'Bound'
+      retries: 30
+      delay: 10
+
+    - name: Tools image of this release
+      kubernetes.core.k8s_info:
+        api_version: image.openshift.io/v1
+        kind: ImageStreamTag
+        namespace: openshift
+        name: tools:latest
+      register: tools_ist
+
+    - name: Pod writes and reads the volume
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: px-smoke
+            namespace: "{{ smoke_namespace }}"
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: rw
+                image: "{{ tools_ist.resources[0].image.dockerImageReference }}"
+                command: [sh, -c, 'echo px-smoke > /data/probe && sync && cat /data/probe && df -h /data | tail -1']
+                volumeMounts: [{name: data, mountPath: /data}]
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  runAsNonRoot: true
+                  capabilities: {drop: [ALL]}
+                  seccompProfile: {type: RuntimeDefault}
+            volumes:
+              - {name: data, persistentVolumeClaim: {claimName: px-smoke}}
+        wait: true
+        wait_condition:
+          type: Ready
+          status: "False"
+          reason: PodCompleted
+        wait_timeout: 600
+
+    - name: Pod output
+      kubernetes.core.k8s_log:
+        namespace: "{{ smoke_namespace }}"
+        name: px-smoke
+      register: smoke_log
+
+    - name: Realm pod with the volume
+      everpure.flasharray.purefa_info:
+        fa_url: "{{ fa.endpoint }}"
+        api_token: "{{ vault_flasharray_api_token }}"
+        gather_subset: [pods]
+      register: fa_after
+      no_log: true
+
+    - name: The data was written and {{ fa.realm }}::{{ fa.pod }} grew by the PVC's size
+      ansible.builtin.assert:
+        that:
+          - smoke_log.log_lines | first == 'px-smoke'
+          - grown | int >= smoke_size_gib | int * 1073741824
+        fail_msg: >-
+          log {{ smoke_log.log_lines }}; {{ fa.realm }}::{{ fa.pod }} provisioned {{ before | human_readable }}
+          before, {{ after | human_readable }} after (expected +{{ smoke_size_gib }} GiB)
+        success_msg: >-
+          {{ pvc.resources[0].spec.volumeName }} in {{ fa.realm }}::{{ fa.pod }}
+          (+{{ grown | human_readable }}): {{ smoke_log.log_lines | select | last }}
+      vars:
+        pod_name: "{{ fa.realm }}::{{ fa.pod }}"
+        before: "{{ fa_before.purefa_info.pods[pod_name].total_provisioned | default(0) | int }}"
+        after: "{{ fa_after.purefa_info.pods[pod_name].total_provisioned | default(0) | int }}"
+        grown: "{{ after | int - before | int }}"
+
+  always:
+    - name: Clean up
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
         name: "{{ smoke_namespace }}"
-
-- name: PVC
-  kubernetes.core.k8s:
-    definition:
-      apiVersion: v1
-      kind: PersistentVolumeClaim
-      metadata:
-        name: px-smoke
-        namespace: "{{ smoke_namespace }}"
-      spec:
-        accessModes: [ReadWriteOnce]
-        storageClassName: "{{ px.storageclass.name }}"
-        resources:
-          requests:
-            storage: 1Gi
-
-- name: PVC bound
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: PersistentVolumeClaim
-    namespace: "{{ smoke_namespace }}"
-    name: px-smoke
-  register: pvc
-  until: (pvc.resources[0].status.phase | default('')) == 'Bound'
-  retries: 30
-  delay: 10
-
-- name: Tools image of this release
-  kubernetes.core.k8s_info:
-    api_version: image.openshift.io/v1
-    kind: ImageStreamTag
-    namespace: openshift
-    name: tools:latest
-  register: tools_ist
-
-- name: Pod writes and reads the volume
-  kubernetes.core.k8s:
-    definition:
-      apiVersion: v1
-      kind: Pod
-      metadata:
-        name: px-smoke
-        namespace: "{{ smoke_namespace }}"
-      spec:
-        restartPolicy: Never
-        containers:
-          - name: rw
-            image: "{{ tools_ist.resources[0].image.dockerImageReference }}"
-            command: [sh, -c, 'echo px-smoke > /data/probe && sync && cat /data/probe && df -h /data | tail -1']
-            volumeMounts: [{name: data, mountPath: /data}]
-            securityContext:
-              allowPrivilegeEscalation: false
-              runAsNonRoot: true
-              capabilities: {drop: [ALL]}
-              seccompProfile: {type: RuntimeDefault}
-        volumes:
-          - {name: data, persistentVolumeClaim: {claimName: px-smoke}}
-    wait: true
-    wait_condition:
-      type: Ready
-      status: "False"
-      reason: PodCompleted
-    wait_timeout: 600
-
-- name: Pod output
-  kubernetes.core.k8s_log:
-    namespace: "{{ smoke_namespace }}"
-    name: px-smoke
-  register: smoke_log
-
-- name: Array volumes in the realm
-  everpure.flasharray.purefa_info:
-    fa_url: "{{ fa.endpoint }}"
-    api_token: "{{ vault_flasharray_api_token }}"
-    gather_subset: [volumes]
-  register: fa_info
-  no_log: true
-
-- name: The data was written and the volume lives in {{ fa.realm }}::{{ fa.pod }}
-  ansible.builtin.assert:
-    that:
-      - smoke_log.log_lines | first == 'px-smoke'
-      - smoke_volumes | length == 1
-    fail_msg: "log {{ smoke_log.log_lines }}; volumes for {{ pvc.resources[0].spec.volumeName }}: {{ smoke_volumes }}"
-    success_msg: "{{ smoke_volumes | first }}: {{ smoke_log.log_lines | last }}"
-  vars:
-    smoke_volumes: >-
-      {{ fa_info.purefa_info.volumes | default({}) | dict2items | map(attribute='key')
-         | select('match', '^' ~ fa.realm ~ '::' ~ fa.pod ~ '::')
-         | select('search', pvc.resources[0].spec.volumeName) | list }}
-
-- name: Clean up
-  kubernetes.core.k8s:
-    api_version: v1
-    kind: Namespace
-    name: "{{ smoke_namespace }}"
-    state: absent
-    wait: true
-    wait_timeout: 600
+        state: absent
+        wait: true
+        wait_timeout: 600
