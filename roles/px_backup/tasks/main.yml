@@ -124,6 +124,18 @@
         tls: {termination: edge, insecureEdgeTerminationPolicy: Redirect}
   when: pxb_ui.resources | length == 1
 
+- name: Cloud credential, backup location and application cluster
+  ansible.builtin.include_tasks: configure.yml
+  when: b.s3.flashblade | length > 0 and b.s3.configure
+  vars:
+    s3: "{{ b.s3 }}"
+    org: default
+    api_host: "px-backup-api.{{ b.ui_host.split('.', 1)[1] }}"
+    api: "https://px-backup-api.{{ b.ui_host.split('.', 1)[1] }}"
+    kdir: "{{ cdir }}/px-backup"
+    cred: "{{ c.cluster.name }}-flashblade"
+    loc: "{{ c.cluster.name }}-flashblade-s3"
+
 - name: Pods not running
   kubernetes.core.k8s_info:
     api_version: v1

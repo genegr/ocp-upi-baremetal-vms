@@ -1,0 +1,253 @@
+---
+# Portworx Backup objects through its REST API (pkg/apis/v1: /v1/cloudcredential, /v1/backuplocation, /v1/cluster),
+# each read first and created only when missing: the S3 cloud credential (the FlashBlade key), the backup location
+# (the bucket) and this cluster as an application cluster. The API is published with an edge Route (Portworx's docs
+# expose it with a NodePort); every call carries a Keycloak token (password grant, client pxcentral, user admin).
+# The cluster is added with a dedicated ServiceAccount's token (cluster-admin: backup and restore of any namespace),
+# not the installer's admin certificate.
+- name: Route {{ api_host }} for the Portworx Backup API
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: route.openshift.io/v1
+      kind: Route
+      metadata: {name: px-backup-api, namespace: "{{ b.namespace }}"}
+      spec:
+        host: "{{ api_host }}"
+        to: {kind: Service, name: px-backup}
+        port: {targetPort: 10001}
+        tls: {termination: edge, insecureEdgeTerminationPolicy: Redirect}
+
+# Keycloak makes `admin` set a new password at its first UI login, and refuses tokens until then ("Account is not
+# fully set up"). The new password is kept in .state/clusters/<name>/px-backup/admin-password (the owner sets exactly
+# that one at first login); without the file the initial password from pxcentral-keycloak-http is tried.
+- name: Admin password set at first login
+  ansible.builtin.stat:
+    path: "{{ kdir }}/admin-password"
+  register: admin_pw_file
+
+- name: Initial admin password
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ b.namespace }}"
+    name: pxcentral-keycloak-http
+  register: kc_secret
+  when: not admin_pw_file.stat.exists
+  no_log: true
+
+- name: Token (Keycloak password grant)
+  ansible.builtin.uri:
+    url: "https://{{ b.ui_host }}/auth/realms/master/protocol/openid-connect/token"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      client_id: pxcentral
+      grant_type: password
+      username: admin
+      password: "{{ lookup('ansible.builtin.file', kdir ~ '/admin-password') if admin_pw_file.stat.exists
+                    else kc_secret.resources[0].data.password | b64decode }}"
+    validate_certs: false
+    return_content: true
+    status_code: [200, 400, 401]
+  register: kc_token
+  no_log: true
+
+- name: Token issued
+  ansible.builtin.assert:
+    that: kc_token.status == 200
+    fail_msg: >-
+      Keycloak: {{ kc_token.json.error_description | default(kc_token.status) }}. Log in once at https://{{ b.ui_host }}
+      as admin and set the password in {{ kdir }}/admin-password, then rerun.
+    quiet: true
+
+- name: API headers
+  ansible.builtin.set_fact:
+    pxb_headers: {Authorization: "Bearer {{ kc_token.json.access_token }}"}
+  no_log: true
+
+# --- cloud credential --------------------------------------------------------------------------------------------
+- name: Cloud credential {{ cred }}?
+  ansible.builtin.uri:
+    url: "{{ api }}/v1/cloudcredential/{{ org }}/{{ cred }}"
+    headers: "{{ pxb_headers }}"
+    validate_certs: false
+    status_code: [200, 404, 500]
+  register: cred_get
+  no_log: true
+
+- name: Cloud credential {{ cred }} (S3, the FlashBlade key)
+  ansible.builtin.uri:
+    url: "{{ api }}/v1/cloudcredential"
+    method: POST
+    headers: "{{ pxb_headers }}"
+    body_format: json
+    body:
+      metadata: {name: "{{ cred }}", org_id: "{{ org }}"}
+      cloud_credential:
+        type: AWS
+        aws_config:
+          access_key: "{{ lookup('ansible.builtin.file', kdir ~ '/s3-access-key-id') }}"
+          secret_key: "{{ lookup('ansible.builtin.file', kdir ~ '/s3-secret-access-key') }}"
+    validate_certs: false
+  when: cred_get.status != 200 and not ansible_check_mode
+  changed_when: true
+  no_log: true
+
+- name: Cloud credential uid
+  ansible.builtin.uri:
+    url: "{{ api }}/v1/cloudcredential/{{ org }}/{{ cred }}"
+    headers: "{{ pxb_headers }}"
+    validate_certs: false
+    return_content: true
+  register: cred_info
+  when: not ansible_check_mode
+  no_log: true
+
+# --- backup location ---------------------------------------------------------------------------------------------
+- name: Backup location {{ loc }}?
+  ansible.builtin.uri:
+    url: "{{ api }}/v1/backuplocation/{{ org }}/{{ loc }}"
+    headers: "{{ pxb_headers }}"
+    validate_certs: false
+    status_code: [200, 404, 500]
+  register: loc_get
+  no_log: true
+
+- name: Backup location {{ loc }} (bucket {{ s3.bucket }} on {{ s3.endpoint }})
+  ansible.builtin.uri:
+    url: "{{ api }}/v1/backuplocation"
+    method: POST
+    headers: "{{ pxb_headers }}"
+    body_format: json
+    body:
+      metadata: {name: "{{ loc }}", org_id: "{{ org }}"}
+      backup_location:
+        type: S3
+        path: "{{ s3.bucket }}"
+        cloud_credential_ref:
+          name: "{{ cred }}"
+          uid: "{{ cred_info.json.cloud_credential.metadata.uid }}"
+        s3_config:
+          endpoint: "{{ s3.endpoint }}"
+          region: us-east-1
+          disable_ssl: "{{ not s3.use_ssl }}"
+          disable_path_style: false
+    validate_certs: false
+  when: loc_get.status != 200 and not ansible_check_mode
+  changed_when: true
+  no_log: true
+
+- name: Backup location {{ loc }} validated
+  ansible.builtin.uri:
+    url: "{{ api }}/v1/backuplocation/{{ org }}/{{ loc }}"
+    headers: "{{ pxb_headers }}"
+    validate_certs: false
+    return_content: true
+  register: loc_info
+  until: (loc_info.json.backup_location.backup_location_info.status.status | default('')) in ['Valid', 'Invalid']
+         or (loc_info.json.backup_location.status.status | default('')) in ['Valid', 'Invalid']
+  retries: 18
+  delay: 10
+  when: not ansible_check_mode
+  no_log: true
+
+# --- application cluster -----------------------------------------------------------------------------------------
+- name: ServiceAccount px-backup-cluster with cluster-admin and a token
+  kubernetes.core.k8s:
+    definition: "{{ item }}"
+  loop:
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata: {name: px-backup-cluster, namespace: "{{ b.namespace }}"}
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata: {name: px-backup-cluster-admin}
+      roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin}
+      subjects: [{kind: ServiceAccount, name: px-backup-cluster, namespace: "{{ b.namespace }}"}]
+    - apiVersion: v1
+      kind: Secret
+      type: kubernetes.io/service-account-token
+      metadata:
+        name: px-backup-cluster-token
+        namespace: "{{ b.namespace }}"
+        annotations: {kubernetes.io/service-account.name: px-backup-cluster}
+  loop_control:
+    label: "{{ item.kind }} {{ item.metadata.name }}"
+
+- name: Cluster {{ c.cluster.name }}?
+  ansible.builtin.uri:
+    url: "{{ api }}/v1/cluster/{{ org }}/{{ c.cluster.name }}"
+    headers: "{{ pxb_headers }}"
+    validate_certs: false
+    status_code: [200, 404, 500]
+  register: cl_get
+  no_log: true
+
+- name: Add {{ c.cluster.name }} as an application cluster
+  when: cl_get.status != 200 and not ansible_check_mode
+  block:
+    - name: ServiceAccount token
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        namespace: "{{ b.namespace }}"
+        name: px-backup-cluster-token
+      register: sa_token
+      until: (sa_token.resources[0].data.token | default('')) | length > 0
+      retries: 10
+      delay: 3
+      no_log: true
+
+    - name: Cluster {{ c.cluster.name }}
+      ansible.builtin.uri:
+        url: "{{ api }}/v1/cluster"
+        method: POST
+        headers: "{{ pxb_headers }}"
+        body_format: json
+        body:
+          metadata: {name: "{{ c.cluster.name }}", org_id: "{{ org }}"}
+          kubeconfig: "{{ sa_kubeconfig | to_nice_yaml | b64encode }}"
+        validate_certs: false
+      changed_when: true
+      no_log: true
+      vars:
+        install_kc: "{{ lookup('ansible.builtin.file', kubeconfig) | from_yaml }}"
+        sa_kubeconfig:
+          apiVersion: v1
+          kind: Config
+          clusters:
+            - name: "{{ c.cluster.name }}"
+              cluster:
+                server: "https://api.{{ c.cluster.domain }}:6443"
+                certificate-authority-data: "{{ install_kc.clusters[0].cluster['certificate-authority-data'] }}"
+          users:
+            - name: px-backup-cluster
+              user: {token: "{{ sa_token.resources[0].data.token | b64decode }}"}
+          contexts:
+            - name: px-backup
+              context: {cluster: "{{ c.cluster.name }}", user: px-backup-cluster}
+          current-context: px-backup
+
+- name: Cluster {{ c.cluster.name }} online
+  ansible.builtin.uri:
+    url: "{{ api }}/v1/cluster/{{ org }}/{{ c.cluster.name }}"
+    headers: "{{ pxb_headers }}"
+    validate_certs: false
+    return_content: true
+  register: cl_info
+  until: (cl_info.json.cluster.clusterInfo.status.status | default('')) in ['Online', 'Offline', 'Failed']
+  retries: 18
+  delay: 10
+  when: not ansible_check_mode
+  no_log: true
+
+- name: Portworx Backup configured
+  ansible.builtin.assert:
+    that:
+      - (loc_info.json.backup_location.backup_location_info.status.status | default(loc_info.json.backup_location.status.status | default(''))) == 'Valid'
+      - (cl_info.json.cluster.clusterInfo.status.status | default('')) == 'Online'
+    fail_msg: >-
+      backup location {{ loc }}: {{ loc_info.json.backup_location.backup_location_info.status | default(loc_info.json.backup_location.status | default('?')) }};
+      cluster {{ c.cluster.name }}: {{ cl_info.json.cluster.clusterInfo.status | default('?') }}
+    success_msg: "credential {{ cred }}, backup location {{ loc }} (Valid), cluster {{ c.cluster.name }} (Online)"
+  when: not ansible_check_mode

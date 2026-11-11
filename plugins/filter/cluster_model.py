@@ -187,6 +187,10 @@ DEFAULTS = {
             "account": "",            # default: the cluster name
             "user": "px-backup",
             "bucket": "",             # default: <cluster>-px-backup
+            # Portworx Backup objects made through its API: cloud credential, backup location (S3 over http: the
+            # API has no "skip TLS verify" for a self-signed endpoint), and this cluster as an application cluster.
+            "configure": True,
+            "use_ssl": False,
         },
     },
 }

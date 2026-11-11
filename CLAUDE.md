@@ -159,6 +159,12 @@ clusters/                      <name>.yaml, <name>.htpasswd.yml, vault.yml (giti
   fails with "secret pxc-credentials not found"). The role generates them once into `.state/clusters/<name>/px-backup/`.
   `mongodb-master-encryption-key` (96 characters) can never change: losing it loses the backup metadata. A failed
   first install leaves a `failed` Helm release and a failed `pre-install-check` Job: uninstall and delete them first.
+- **Portworx Backup API**: Keycloak (`/auth/realms/master/...` through the UI Route, client `pxcentral`) refuses a
+  token for `admin` until its first UI login sets a new password ("Account is not fully set up"). The REST gateway
+  (`px-backup` port 10001, `/swagger.json`) isn't behind the UI: it gets its own Route. Statuses are at
+  `backup_location.backup_location_info.status.status` and `cluster.clusterInfo.status.status`. S3 locations have no
+  "skip TLS verify" (`disable_ssl` = plain http), and RHCOS's curl `--aws-sigv4` fails with SignatureDoesNotMatch on
+  FlashBlade: test S3 keys with the AWS CLI (`AWS_REQUEST_CHECKSUM_CALCULATION=when_required`).
 
 ## Skills
 `.claude/skills/`: `ocp-upi-deploy`, `ocp-upi-infra`, `ocp-upi-status`, `ocp-upi-storage`, `ocp-upi-migration`,

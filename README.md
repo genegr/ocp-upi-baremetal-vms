@@ -285,8 +285,13 @@ With `backup.s3.flashblade` (management address; API token in the vault, `token_
 data VIP the cluster reaches), the play also creates the S3 target on the FlashBlade (`everpure.flashblade`): object
 store account `<cluster>`, user `<cluster>/px-backup` with `pure:policy/full-access`, one access key (its ID and
 secret go to `.state/clusters/<name>/px-backup/`, mode 0600, at creation; the secret can't be read again later) and
-bucket `<cluster>-px-backup`. In the UI, add a cloud credential (S3) with that key, then a backup location: endpoint
-`https://<endpoint>`, region `us-east-1`, path-style addressing, SSL verification off for a self-signed certificate.
+bucket `<cluster>-px-backup`. Then, through Portworx Backup's REST API (published by an edge Route,
+`px-backup-api.apps.<domain>`), it creates the cloud credential `<cluster>-flashblade`, the backup location
+`<cluster>-flashblade-s3` (path-style, over http: the API has no "skip TLS verify" for a self-signed endpoint) and adds
+this cluster as an application cluster through a dedicated ServiceAccount (`px-backup-cluster`, cluster-admin, a
+long-lived token), checking that the location is Valid and the cluster Online. Keycloak makes `admin` set a new
+password at the first UI login and issues no token before that: log in once, set the password kept in
+`.state/clusters/<name>/px-backup/admin-password`, then run the play.
 
 ## How a node installs
 
