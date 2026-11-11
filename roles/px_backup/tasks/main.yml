@@ -84,6 +84,12 @@
       telemetry: {enabled: false}
       service: {pxCentralUIServiceType: ClusterIP, pxBackupUIServiceType: ClusterIP}
 
+- name: S3 target on the FlashBlade
+  ansible.builtin.include_tasks: s3.yml
+  when: b.s3.flashblade | length > 0
+  vars:
+    s3: "{{ b.s3 }}"
+
 # Done when the post-install hook job has completed (Portworx Backup install docs).
 - name: Post-install job completed
   kubernetes.core.k8s_info:

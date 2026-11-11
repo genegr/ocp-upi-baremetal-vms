@@ -17,3 +17,5 @@ collections:
     version: 2.2.2
   - name: everpure.flasharray   # FlashArray realm, pod, policy (purestorage.flasharray now redirects here)
     version: 1.45.1
+  - name: everpure.flashblade   # FlashBlade S3 account, user, key, bucket (Portworx Backup target)
+    version: 1.29.0             # 2026-10-30: the latest, an accepted exception to the 2-week rule (owner 2026-11-11)

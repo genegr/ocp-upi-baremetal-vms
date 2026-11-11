@@ -281,6 +281,13 @@ services are ClusterIP, and an edge Route publishes the UI at `ui_host` (default
 waits for the `pxcentral-post-install-hook` job and checks every pod. Backup locations (S3 or NFS), cloud credentials
 and the application clusters are then added in the UI.
 
+With `backup.s3.flashblade` (management address; API token in the vault, `token_var`) and `backup.s3.endpoint` (the
+data VIP the cluster reaches), the play also creates the S3 target on the FlashBlade (`everpure.flashblade`): object
+store account `<cluster>`, user `<cluster>/px-backup` with `pure:policy/full-access`, one access key (its ID and
+secret go to `.state/clusters/<name>/px-backup/`, mode 0600, at creation; the secret can't be read again later) and
+bucket `<cluster>-px-backup`. In the UI, add a cloud credential (S3) with that key, then a backup location: endpoint
+`https://<endpoint>`, region `us-east-1`, path-style addressing, SSL verification off for a self-signed certificate.
+
 ## How a node installs
 
 1. The VM boots with a blank disk. The boot order (disk, then CD-ROM) skips the empty disk, so the ISO boots.

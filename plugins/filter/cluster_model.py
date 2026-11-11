@@ -179,6 +179,15 @@ DEFAULTS = {
         "storageclass": "px-fa",
         "ui_host": "",                # default px-backup.apps.<cluster domain> (edge Route)
         "values": {},                 # extra chart values, merged last
+        # Optional S3 target on a FlashBlade: object store account, user + access key (kept in .state), bucket.
+        "s3": {
+            "flashblade": "",         # FlashBlade management address
+            "token_var": "vault_flashblade_api_token",
+            "endpoint": "",           # data VIP the cluster reaches for S3 (http(s)://<endpoint>)
+            "account": "",            # default: the cluster name
+            "user": "px-backup",
+            "bucket": "",             # default: <cluster>-px-backup
+        },
     },
 }
 
@@ -611,6 +620,17 @@ def _backup(c):
     if not isinstance(b["values"], dict):
         _die("backup.values must be a mapping of extra chart values")
     b["ui_host"] = b["ui_host"] or f"px-backup.apps.{c['cluster']['domain']}"
+    s3 = b["s3"]
+    if s3["flashblade"]:
+        if not s3["endpoint"]:
+            _die("backup.s3.endpoint (the FlashBlade data VIP for S3) is required with backup.s3.flashblade")
+        if not re.match(r"^vault_[a-z0-9_]+$", str(s3["token_var"])):
+            _die("backup.s3.token_var must name a vault variable (vault_...)")
+        s3["account"] = s3["account"] or c["cluster"]["name"]
+        s3["bucket"] = s3["bucket"] or f"{c['cluster']['name']}-px-backup"
+        # S3 bucket names: 3-63 lower-case letters, digits, '-' (and '.')
+        if not re.match(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", s3["bucket"]):
+            _die(f"backup.s3.bucket '{s3['bucket']}' is not a valid S3 bucket name")
 
 
 def haproxy_pools(csv_text):

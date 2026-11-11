@@ -1,0 +1,54 @@
+---
+# Portworx Backup's S3 target on a FlashBlade: object store account <cluster>, user <account>/px-backup with full
+# access to its account's buckets, one access key and a bucket. The key's secret is returned only when it is created:
+# it goes into .state/clusters/<name>/px-backup/ (0600) in the same run and is reused afterwards.
+- name: FlashBlade API token (backup.s3.token_var)
+  ansible.builtin.set_fact:
+    fb_api_token: "{{ lookup('ansible.builtin.vars', s3.token_var) }}"
+  no_log: true
+
+- name: Object store account {{ s3.account }}
+  everpure.flashblade.purefb_s3acc:
+    fb_url: "{{ s3.flashblade }}"
+    api_token: "{{ fb_api_token }}"
+    name: "{{ s3.account }}"
+  register: s3_account
+
+- name: Stored access key
+  ansible.builtin.stat:
+    path: "{{ cdir }}/px-backup/s3-access-key-id"
+  register: s3_key_file
+
+- name: Object store user {{ s3.account }}/{{ s3.user }} (access key only when none is stored)
+  everpure.flashblade.purefb_s3user:
+    fb_url: "{{ s3.flashblade }}"
+    api_token: "{{ fb_api_token }}"
+    account: "{{ s3.account }}"
+    name: "{{ s3.user }}"
+    policy: [pure:policy/full-access]
+    access_key: "{{ not s3_key_file.stat.exists }}"
+  register: s3_user
+  when: not (ansible_check_mode and s3_account is changed)
+  no_log: true
+
+- name: Keep the new access key
+  ansible.builtin.copy:
+    content: "{{ item.value }}"
+    dest: "{{ cdir }}/px-backup/{{ item.key }}"
+    mode: "0600"
+  loop:
+    - {key: s3-access-key-id, value: "{{ s3_user.s3user_info.fb_s3user.access_id | default('') }}"}
+    - {key: s3-secret-access-key, value: "{{ s3_user.s3user_info.fb_s3user.access_key | default('') }}"}
+  loop_control:
+    label: "{{ item.key }}"
+  when: not s3_key_file.stat.exists and not ansible_check_mode
+  failed_when: item.value | length == 0
+  no_log: true
+
+- name: Bucket {{ s3.bucket }}
+  everpure.flashblade.purefb_bucket:
+    fb_url: "{{ s3.flashblade }}"
+    api_token: "{{ fb_api_token }}"
+    account: "{{ s3.account }}"
+    name: "{{ s3.bucket }}"
+  when: not (ansible_check_mode and s3_account is changed)
