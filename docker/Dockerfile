@@ -35,10 +35,11 @@ FROM ${FEDORA_IMAGE}
 ARG COREOS_INSTALLER_VERSION=0.26.0
 LABEL org.opencontainers.image.title="ocp-upi-toolbox"
 # coreos-installer: ISO customization. iputils: the preflight "node IP is free" ping. openssh-clients: Ansible to
-# the infra host. git/tar/unzip/gzip: Ansible unarchive and Galaxy.
+# the infra host. git/tar/unzip/gzip: Ansible unarchive and Galaxy. sshpass: one-time password login to hosts
+# before key auth (ansible-core 2.21 no longer ships the paramiko connection).
 RUN dnf -y install --setopt=install_weak_deps=False \
       "coreos-installer-${COREOS_INSTALLER_VERSION}" \
-      python3 python3-pip openssh-clients git tar unzip gzip iputils ca-certificates \
+      python3 python3-pip openssh-clients git tar unzip gzip iputils ca-certificates sshpass \
  && dnf clean all
 COPY --from=bins /out/ /usr/local/bin/
 COPY requirements.txt requirements.yml /tmp/
