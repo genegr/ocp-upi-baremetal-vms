@@ -1,0 +1,137 @@
+---
+# Portworx Backup on this cluster: the px-central Helm chart (pinned) with pxbackup on, its databases on a block
+# StorageClass, UI services ClusterIP + an edge Route (no cloud load balancer on a UPI cluster). On OpenShift the
+# chart's service accounts get the restricted SCC (Portworx Backup install requirements).
+- name: Namespace {{ b.namespace }}
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ b.namespace }}"
+        labels: {app.kubernetes.io/managed-by: ocp-upi}
+  register: pxb_ns
+
+- name: Restricted SCC for the chart's service accounts
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata: {name: px-backup-scc-restricted, namespace: "{{ b.namespace }}"}
+      roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: "system:openshift:scc:restricted"}
+      subjects: "{{ px_backup_service_accounts | map('community.general.dict_kv', 'name')
+                    | map('combine', {'kind': 'ServiceAccount', 'namespace': b.namespace}) | list }}"
+  when: not (ansible_check_mode and pxb_ns is changed)
+
+# Portworx Backup 3.x refuses to install without pxc-credentials (pre-install hook). Every value is generated once
+# into .state/clusters/<name>/px-backup/ (0600) and reused, so reruns write the same Secret. Alphanumeric only (MongoDB
+# and PostgreSQL forbid @ : / % & #). The master encryption key (96 characters) can never change: losing the file
+# makes the encrypted backup metadata unrecoverable.
+- name: Credentials directory
+  ansible.builtin.file:
+    path: "{{ cdir }}/px-backup"
+    state: directory
+    mode: "0700"
+
+- name: Generated credentials
+  ansible.builtin.set_fact:
+    pxb_credentials: "{{ pxb_credentials | default({}) | combine({item.key: lookup('ansible.builtin.password',
+                         cdir ~ '/px-backup/' ~ item.key, length=item.length, chars=['ascii_letters', 'digits'])}) }}"
+  loop:
+    - {key: mongodb-px-backup-password, length: 24}
+    - {key: mongodb-root-password, length: 24}
+    - {key: mongodb-replica-set-key, length: 64}
+    - {key: mongodb-master-encryption-key, length: 96}
+    - {key: postgresql-password, length: 24}
+    - {key: mysql-password, length: 24}
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+
+- name: Credential files mode
+  ansible.builtin.file:
+    path: "{{ cdir }}/px-backup/{{ item }}"
+    mode: "0600"
+  loop: "{{ pxb_credentials.keys() | list }}"
+
+- name: Secret pxc-credentials
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata: {name: pxc-credentials, namespace: "{{ b.namespace }}"}
+      type: Opaque
+      data: "{{ dict(pxb_credentials.keys() | zip(pxb_credentials.values() | map('b64encode'))) }}"
+  when: not (ansible_check_mode and pxb_ns is changed)
+  no_log: true
+
+- name: px-central {{ b.chart_version }} (Portworx Backup)
+  kubernetes.core.helm:
+    name: px-central
+    chart_ref: "{{ b.chart }}"
+    chart_repo_url: "{{ b.chart_repo }}"
+    chart_version: "{{ b.chart_version }}"
+    release_namespace: "{{ b.namespace }}"
+    kubeconfig: "{{ kubeconfig }}"
+    values: "{{ px_backup_values | combine(b['values'], recursive=true) }}"
+    wait: false
+  when: not (ansible_check_mode and pxb_ns is changed)
+  vars:
+    px_backup_values:
+      persistentStorage: {enabled: true, storageClassName: "{{ b.storageclass }}"}
+      pxbackup: {enabled: true}
+      isOpenshift: true
+      telemetry: {enabled: false}
+      service: {pxCentralUIServiceType: ClusterIP, pxBackupUIServiceType: ClusterIP}
+
+# Done when the post-install hook job has completed (Portworx Backup install docs).
+- name: Post-install job completed
+  kubernetes.core.k8s_info:
+    api_version: batch/v1
+    kind: Job
+    namespace: "{{ b.namespace }}"
+    name: pxcentral-post-install-hook
+  register: pxb_job
+  until: (pxb_job.resources[0].status.succeeded | default(0)) | int >= 1
+  retries: 90
+  delay: 20
+  when: not ansible_check_mode
+
+- name: UI service
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Service
+    namespace: "{{ b.namespace }}"
+    name: px-backup-ui
+  register: pxb_ui
+
+- name: Route {{ b.ui_host }} (edge TLS)
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: route.openshift.io/v1
+      kind: Route
+      metadata: {name: px-backup-ui, namespace: "{{ b.namespace }}"}
+      spec:
+        host: "{{ b.ui_host }}"
+        to: {kind: Service, name: px-backup-ui}
+        port: {targetPort: "{{ pxb_ui.resources[0].spec.ports[0].name | default(pxb_ui.resources[0].spec.ports[0].port) }}"}
+        tls: {termination: edge, insecureEdgeTerminationPolicy: Redirect}
+  when: pxb_ui.resources | length == 1
+
+- name: Pods not running
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ b.namespace }}"
+  register: pxb_pods
+  when: not ansible_check_mode
+
+- name: Every pod Running or Completed
+  ansible.builtin.assert:
+    that: bad | length == 0
+    fail_msg: "not ready: {{ bad }}"
+    success_msg: "Portworx Backup {{ b.chart_version }}: {{ pxb_pods.resources | length }} pods; UI https://{{ b.ui_host }}"
+  vars:
+    bad: "{{ pxb_pods.resources | rejectattr('status.phase', 'in', ['Running', 'Succeeded'])
+             | map(attribute='metadata.name') | list }}"
+  when: not ansible_check_mode

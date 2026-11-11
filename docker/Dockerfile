@@ -11,6 +11,8 @@ FROM ${FEDORA_IMAGE} AS bins
 ARG TOFU_VERSION=1.13.1
 # govc: vCenter SSO users (sso.user.*), which no Ansible module manages (MTV's vCenter account).
 ARG GOVC_VERSION=0.56.2
+# helm: charts that ship only as Helm charts (Portworx Backup, px-central), driven by kubernetes.core.helm.
+ARG HELM_VERSION=3.22.1
 RUN dnf -y install --setopt=install_weak_deps=False curl unzip tar gzip && dnf clean all
 WORKDIR /dl
 RUN set -eux; \
@@ -22,6 +24,10 @@ RUN set -eux; \
     curl -fsSL -o govc_checksums.txt "https://github.com/vmware/govmomi/releases/download/v${GOVC_VERSION}/checksums.txt"; \
     sha256sum -c --ignore-missing govc_checksums.txt; \
     tar -xzf govc_Linux_x86_64.tar.gz -C /out govc; \
+    curl -fsSLO "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"; \
+    curl -fsSLO "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz.sha256sum"; \
+    sha256sum -c "helm-v${HELM_VERSION}-linux-amd64.tar.gz.sha256sum"; \
+    tar -xzf "helm-v${HELM_VERSION}-linux-amd64.tar.gz" --strip-components=1 -C /out linux-amd64/helm; \
     chmod 0755 /out/*
 
 # --- toolbox ----------------------------------------------------------------

@@ -168,6 +168,18 @@ DEFAULTS = {
         "network_map": [],            # [{source: <port group name>, destination: pod}]
         "plans": [],                  # [{name, vms: [names], target_namespace, type: cold}] (started by hand)
     },
+    # Opt-in: Portworx Backup (playbooks/backup.yml), the px-central Helm chart with pxbackup on, on this cluster.
+    # Its databases want a block StorageClass (several hundred GiB, thin): FADA volumes by default.
+    "backup": {
+        "enabled": False,
+        "namespace": "px-backup",
+        "chart_repo": "https://charts.portworx.io/",
+        "chart": "px-central",
+        "chart_version": "3.1.2",
+        "storageclass": "px-fa",
+        "ui_host": "",                # default px-backup.apps.<cluster domain> (edge Route)
+        "values": {},                 # extra chart values, merged last
+    },
 }
 
 # Hypervisor-specific rules; everything else here is platform-neutral. A new platform needs an entry here (its
@@ -397,6 +409,7 @@ def cluster_model(raw, config_path):
     _storage(c, nodes, net)
     _addons(c)
     _migration(c)
+    _backup(c)
     return c
 
 
@@ -584,6 +597,20 @@ def _migration(c):
         else:
             _die(f"migration.network_map[{i}]: destination must be pod or <namespace>/<network-attachment>")
         m["network_map_spec"].append({"source": {"name": nm["source"]}, "destination": d})
+
+
+def _backup(c):
+    """Validate the backup section and derive the UI host."""
+    b = c["backup"]
+    if not b["enabled"]:
+        return
+    if not c["storage"]["portworx"]["enabled"]:
+        _die("backup needs storage.portworx.enabled (Stork and a block StorageClass for its databases)")
+    if not re.match(r"^\d+\.\d+\.\d+$", str(b["chart_version"])):
+        _die("backup.chart_version must be an exact version (pinned)")
+    if not isinstance(b["values"], dict):
+        _die("backup.values must be a mapping of extra chart values")
+    b["ui_host"] = b["ui_host"] or f"px-backup.apps.{c['cluster']['domain']}"
 
 
 def haproxy_pools(csv_text):

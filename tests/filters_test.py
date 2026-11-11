@@ -190,6 +190,17 @@ mgc = copy.deepcopy(mg); mgc["storage"]["portworx"]["mode"] = "csi"
 check("migration: no Portworx hook in PX-CSI mode",
       cluster_model(mgc, EXAMPLE)["migration"]["copy_offload"]["portworx_hook"] is False)
 
+# --- backup -------------------------------------------------------------------------------------------------------
+check("backup: off by default", cluster_model(base, EXAMPLE)["backup"]["enabled"] is False)
+bk = copy.deepcopy(ent); bk["backup"] = {"enabled": True}
+cb = cluster_model(bk, EXAMPLE)["backup"]
+check("backup: defaults (px-central pinned, FADA databases, UI host under apps)",
+      (cb["chart"], cb["storageclass"], cb["ui_host"].startswith("px-backup.apps.")) == ("px-central", "px-fa", True))
+bad = copy.deepcopy(bk); bad["backup"]["chart_version"] = "3.1"
+rejects("backup: chart version is exact", bad, "exact version")
+bad = copy.deepcopy(base); bad["backup"] = {"enabled": True}
+rejects("backup: needs Portworx", bad, "needs storage.portworx.enabled")
+
 # --- dns forward zones --------------------------------------------------------------------------------------------
 fw = copy.deepcopy(base)
 fw.setdefault("infra", {}).setdefault("dns", {})["forward_zones"] = [

@@ -64,10 +64,10 @@ drives every phase, from a pinned toolbox container on a Docker jump box. Human 
 
 ## Layout
 ```
-compose.yaml, docker/          toolbox image (Fedora 44: coreos-installer, OpenTofu, ansible-core + collections)
+compose.yaml, docker/          toolbox image (Fedora 44: coreos-installer, OpenTofu, govc, Helm, ansible-core + collections)
 ansible.cfg, inventory/        localhost; infra host added at run time (cluster_model)
 playbooks/                     deploy (tags = phases), infra, users, rolling_update, storage (tags = phases; teardown
-                               only with --tags teardown), addons, migration (tags array, vsphere, mtv), status, destroy,
+                               only with --tags teardown), addons, migration (tags array, vsphere, mtv), backup, status, destroy,
                                tools/oc
 roles/                         one per phase; vms is reused by bootstrap, install_complete, rolling_update, destroy;
                                olm_operator installs one pinned OLM operator (Manual approval)
@@ -154,6 +154,10 @@ clusters/                      <name>.yaml, <name>.htpasswd.yml, vault.yml (giti
   netplan that matches the NIC driver (static on `vmxnet3`, DHCP on `virtio_net`).
 - **`oc` short names collide with ACM**: `subscription` resolves to ACM's `apps.open-cluster-management.io`
   Subscription; use `subscriptions.operators.coreos.com` for OLM.
+- **Portworx Backup 3.x needs the `pxc-credentials` Secret before `helm install`** (six keys; the pre-install hook
+  fails with "secret pxc-credentials not found"). The role generates them once into `.state/clusters/<name>/px-backup/`.
+  `mongodb-master-encryption-key` (96 characters) can never change: losing it loses the backup metadata. A failed
+  first install leaves a `failed` Helm release and a failed `pre-install-check` Job: uninstall and delete them first.
 
 ## Skills
 `.claude/skills/`: `ocp-upi-deploy`, `ocp-upi-infra`, `ocp-upi-status`, `ocp-upi-storage`, `ocp-upi-migration`,

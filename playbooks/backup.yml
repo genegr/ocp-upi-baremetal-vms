@@ -1,0 +1,26 @@
+---
+# Portworx Backup (px-central Helm chart, pinned) on this cluster, opt-in via `backup:`.
+#   ansible-playbook playbooks/backup.yml -e cluster=<name> [--check]
+# Backup locations (S3/NFS), cloud credentials and the application clusters are added afterwards in the UI.
+- name: Cluster model
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - cluster_model
+  tasks:
+    - name: Portworx Backup is configured for this cluster
+      ansible.builtin.assert:
+        that: c.backup.enabled
+        fail_msg: "{{ cluster }} has no backup section (backup.enabled)"
+        quiet: true
+
+- name: Portworx Backup
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+  vars:
+    b: "{{ c.backup }}"
+  roles:
+    - px_backup

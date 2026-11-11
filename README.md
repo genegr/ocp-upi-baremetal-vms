@@ -271,6 +271,16 @@ Plans are created and validated, not started: start one from the console (Migrat
 CR. Measured in the lab (30 GiB Ubuntu VM): about 1 min disk transfer, 4.5 min guest conversion, 3.5 min Portworx hook.
 Without the hook (`portworx_hook: false`) the VM stays on its FADA volumes: shorter, with array-native data services.
 
+## Optional: Portworx Backup
+
+`backup: {enabled: true}` and `tb ansible-playbook playbooks/backup.yml -e cluster=<name>` install Portworx Backup
+with Portworx's `px-central` Helm chart (pinned `chart_version`, `pxbackup.enabled`), through `kubernetes.core.helm`
+(Helm is in the toolbox). Its databases (MongoDB, MySQL for Keycloak, Prometheus; several hundred GiB, thin) go on
+`storageclass`, by default FADA (`px-fa`). On OpenShift the chart's service accounts get the restricted SCC, the UI
+services are ClusterIP, and an edge Route publishes the UI at `ui_host` (default `px-backup.apps.<domain>`). The play
+waits for the `pxcentral-post-install-hook` job and checks every pod. Backup locations (S3 or NFS), cloud credentials
+and the application clusters are then added in the UI.
+
 ## How a node installs
 
 1. The VM boots with a blank disk. The boot order (disk, then CD-ROM) skips the empty disk, so the ISO boots.
@@ -291,12 +301,12 @@ copies `.state/` or `clusters/vault.yml`. tar doesn't delete, so remove deleted 
 ```
 compose.yaml, docker/          toolbox image (everything pinned), host networking
 ansible.cfg, inventory/        localhost; the infra host is added at run time from the cluster config
-playbooks/                     deploy, infra, users, rolling_update, storage, addons, migration, status, destroy,
-                               tools/oc
+playbooks/                     deploy, infra, users, rolling_update, storage, addons, migration, backup, status,
+                               destroy, tools/oc
 roles/                         cluster_model tools infra preflight ignition isos vms bootstrap csr install_complete
                                htpasswd rolling_update status olm_operator storage_network storage_node
                                flasharray_realm flasharray_cleanup portworx storage_smoke addons
-                               migration_array migration_vsphere migration_mtv
+                               migration_array migration_vsphere migration_mtv px_backup
 plugins/filter/                cluster_model (validate + derive), htpasswd (bcrypt), k8s (conditions, NMState)
 plugins/modules/               ocp_csr_approve (no upstream module approves CSRs), purefa_realm_admin (realm user:
                                no module of everpure.flasharray 1.45 makes a policy-only user), purefa_resource_access
