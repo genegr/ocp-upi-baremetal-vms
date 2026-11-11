@@ -1,0 +1,89 @@
+---
+# Portworx rapid-migration resources (docs.portworx.com, portworx-rapid-migration-resources.yaml), images pinned by
+# digest: the hook's ConfigMap, the converter ServiceAccount with its ClusterRole/Binding and SCC, and the Hook CR.
+- name: Portworx hook resources
+  kubernetes.core.k8s:
+    definition: "{{ item }}"
+  loop_control:
+    label: "{{ item.kind }} {{ item.metadata.name }}"
+  loop:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata: {name: fa-pxd-hook-config, namespace: "{{ m.namespace }}"}
+      data:
+        CONVERTER_IMAGE: "{{ co.converter_image }}"
+        FA_API_VERSION: "2.9"
+        XCOPY_JOBS: "512"
+        POKE_WORKERS: "512"
+        STATS_INTERVAL: "60"
+        VERIFY_AFTER_COPY: "false"
+        CONVERTER_POD_MAX_RETRIES: "2"
+        DEVICE_ATTACH_TIMEOUT_MINUTES: "10"
+        XCOPY_CONCURRENCY: "8"
+        POKE_CONCURRENCY: "10"
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata: {name: fa-pxd-converter, namespace: "{{ m.namespace }}"}
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata: {name: fa-pxd-converter}
+      rules:
+        - {apiGroups: [""], resources: [persistentvolumeclaims], verbs: [get, list, watch, create, delete]}
+        - {apiGroups: [""], resources: [persistentvolumes], verbs: [get, list, update, delete]}
+        - {apiGroups: [""], resources: [pods], verbs: [get, list, create, watch, delete]}
+        - {apiGroups: [""], resources: [pods/log], verbs: [get]}
+        - {apiGroups: [batch], resources: [jobs], verbs: [get, list, watch, create, delete]}
+        - {apiGroups: [""], resources: [serviceaccounts], verbs: [get, create]}
+        - {apiGroups: [""], resources: [secrets, configmaps], verbs: [get, list, create, delete]}
+        - {apiGroups: [forklift.konveyor.io], resources: [storagemaps], verbs: [get, list]}
+        - {apiGroups: [storage.k8s.io], resources: [storageclasses], verbs: [get, list]}
+        - {apiGroups: [security.openshift.io], resources: [securitycontextconstraints], verbs: [get, update]}
+        - {apiGroups: [rbac.authorization.k8s.io], resources: [clusterrolebindings], verbs: [get, update]}
+        - {apiGroups: [kubevirt.io], resources: [virtualmachines, virtualmachineinstances, virtualmachines/finalizers], verbs: [get, list, update, patch]}
+        - {apiGroups: [subresources.kubevirt.io], resources: [virtualmachines/start, virtualmachines/stop], verbs: [update]}
+    - apiVersion: forklift.konveyor.io/v1beta1
+      kind: Hook
+      metadata: {name: fa-pxd-hook, namespace: "{{ m.namespace }}"}
+      spec:
+        image: "{{ co.hook_image }}"
+        serviceAccount: fa-pxd-converter
+        deadline: 7200
+
+# The hook adds the target namespaces' ServiceAccounts to this binding (and to the SCC's users) at run time: create
+# the binding only when it is missing, and never set the SCC's users, so a rerun doesn't take them away.
+- name: ClusterRoleBinding fa-pxd-converter present?
+  kubernetes.core.k8s_info:
+    api_version: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    name: fa-pxd-converter
+  register: px_crb
+
+- name: ClusterRoleBinding fa-pxd-converter
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata: {name: fa-pxd-converter}
+      roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: fa-pxd-converter}
+      subjects: [{kind: ServiceAccount, name: fa-pxd-converter, namespace: "{{ m.namespace }}"}]
+  when: px_crb.resources | length == 0
+
+- name: SCC fa-pxd-converter-scc
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: security.openshift.io/v1
+      kind: SecurityContextConstraints
+      metadata: {name: fa-pxd-converter-scc}
+      allowHostDirVolumePlugin: true
+      allowHostIPC: false
+      allowHostNetwork: false
+      allowHostPID: true
+      allowHostPorts: false
+      allowPrivilegedContainer: true
+      allowedCapabilities: [SYS_RAWIO, SYS_ADMIN]
+      fsGroup: {type: RunAsAny}
+      readOnlyRootFilesystem: false
+      runAsUser: {type: RunAsAny}
+      seLinuxContext: {type: RunAsAny}
+      supplementalGroups: {type: RunAsAny}
+      volumes: ["*"]

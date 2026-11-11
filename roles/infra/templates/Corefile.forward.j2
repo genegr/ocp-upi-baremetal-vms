@@ -1,0 +1,5 @@
+{{ fz.zone }} {
+    forward . {{ fz.servers | join(' ') }}
+    cache 30
+    errors
+}

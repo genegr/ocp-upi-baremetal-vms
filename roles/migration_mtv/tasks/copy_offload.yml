@@ -1,0 +1,69 @@
+---
+# FlashArray XCOPY: the populator's secret (realm user's token: the ESXi hosts and host groups have realm access),
+# the ESXi hosts that run the clones (MTV's SSH key + dedicatedMigrationHosts) and the StorageMap.
+- name: Portworx cluster UID (PURE_CLUSTER_PREFIX = <realm>::<pod>::px_<first 8 of the UID>)
+  kubernetes.core.k8s_info:
+    api_version: core.libopenstorage.org/v1
+    kind: StorageCluster
+    namespace: "{{ c.storage.portworx.namespace }}"
+  register: px_stc
+  failed_when: px_stc.resources | default([]) | length != 1
+
+- name: FlashArray secret {{ src.name }}-xcopy (XCOPY populator + Portworx hook)
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata: {name: "{{ src.name }}-xcopy", namespace: "{{ m.namespace }}"}
+      type: Opaque
+      data: "{{ dict(secret_data.keys() | zip(secret_data.values() | map('b64encode'))) }}"
+  vars:
+    prefix_parts: "{{ ([c.storage.flasharray.realm] if c.storage.flasharray.realm else [])
+                      + ([c.storage.flasharray.pod] if c.storage.flasharray.pod else [])
+                      + ['px_' ~ px_stc.resources[0].status.clusterUid[:8]] }}"
+    secret_data: "{{ {'STORAGE_HOSTNAME': c.storage.flasharray.endpoint,
+                      'STORAGE_TOKEN': lookup('ansible.builtin.file', cdir ~ '/flasharray-' ~ c.storage.flasharray.user ~ '.token'),
+                      'STORAGE_SKIP_SSL_VERIFICATION': 'true',
+                      'PURE_CLUSTER_PREFIX': prefix_parts | join('::')}
+                    | combine({'PXD_STORAGE_CLASS': co.pxd_storageclass} if co.portworx_hook else {}) }}"
+  no_log: true
+
+- name: Clone hosts' vSphere IDs
+  ansible.builtin.command:
+    argv: [govc, find, -i, "/{{ src.datacenter }}/host", -type, h, -name, "{{ item }}"]
+  environment: "{{ govc_env }}"
+  loop: "{{ src.clone_hosts }}"
+  register: clone_host_ids
+  changed_when: false
+
+- name: StorageMap entries (one per migration datastore)
+  ansible.builtin.set_fact:
+    storage_map_entries: "{{ storage_map_entries | default([]) + [entry] }}"
+  loop: "{{ co.datastores }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    entry:
+      source: {name: "{{ item.name }}"}
+      destination: {storageClass: "{{ co.storageclass }}", accessMode: "{{ co.access_mode }}", volumeMode: "{{ co.volume_mode }}"}
+      offloadPlugin:
+        vsphereXcopyConfig:
+          secretRef: "{{ src.name }}-xcopy"
+          storageVendorProduct: pureFlashArray
+          dedicatedMigrationHosts: "{{ clone_host_ids.results | map(attribute='stdout') | map('regex_replace', '^HostSystem:', '') | list }}"
+
+- name: StorageMap {{ src.name }}-xcopy
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: StorageMap
+      metadata: {name: "{{ src.name }}-xcopy", namespace: "{{ m.namespace }}"}
+      spec:
+        provider:
+          source: {name: "{{ src.name }}", namespace: "{{ m.namespace }}"}
+          destination: {name: "{{ host_provider }}", namespace: "{{ m.namespace }}"}
+        map: "{{ storage_map_entries }}"
+
+- name: MTV's SSH key on the clone hosts
+  ansible.builtin.include_tasks: esxi_key.yml
+  when: not ansible_check_mode

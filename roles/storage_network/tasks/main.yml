@@ -9,7 +9,7 @@
     olm_namespace: "{{ nmstate_namespace }}"
     olm_package: kubernetes-nmstate-operator
     olm_channel: "{{ nmstate_channel }}"
-    olm_csv: "{{ nmstate_csv }}"
+    olm_csv: "{{ c.storage.nmstate_csv }}"
     olm_source: redhat-operators
 
 - name: NMState instance

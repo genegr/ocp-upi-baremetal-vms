@@ -1,0 +1,37 @@
+---
+# One MTV Plan: VMs by name, the maps of this source, the Portworx hook after each VM (enterprise mode). Static IPs are
+# not preserved on the pod network (MTV warns the combination is unsupported). Validated here, started by hand.
+- name: "Plan {{ plan.name }}"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: Plan
+      metadata: {name: "{{ plan.name }}", namespace: "{{ m.namespace }}"}
+      spec:
+        description: "{{ plan.description | default('ocp-upi migration plan') }}"
+        type: "{{ plan.type }}"
+        targetNamespace: "{{ plan.target_namespace }}"
+        targetPowerState: "on"
+        preserveStaticIPs: "{{ m.network_map | selectattr('destination', 'eq', 'pod') | list | length == 0 }}"
+        provider:
+          source: {name: "{{ src.name }}", namespace: "{{ m.namespace }}"}
+          destination: {name: "{{ host_provider }}", namespace: "{{ m.namespace }}"}
+        map:
+          storage: {name: "{{ src.name }}-xcopy", namespace: "{{ m.namespace }}"}
+          network: {name: "{{ src.name }}-net", namespace: "{{ m.namespace }}"}
+        vms: "{{ plan.vms | map('community.general.dict_kv', 'name') | map('combine', vm_hooks) | list }}"
+  vars:
+    vm_hooks: "{{ {'hooks': [{'hook': {'name': 'fa-pxd-hook', 'namespace': m.namespace}, 'step': 'PostHook'}]}
+                  if (co.enabled and co.portworx_hook) else {} }}"
+
+- name: "Plan {{ plan.name }} ready"
+  kubernetes.core.k8s_info:
+    api_version: forklift.konveyor.io/v1beta1
+    kind: Plan
+    namespace: "{{ m.namespace }}"
+    name: "{{ plan.name }}"
+  register: plan_info
+  until: plan_info.resources | length == 1 and plan_info.resources[0] | k8s_condition('Ready') == 'True'
+  retries: 18
+  delay: 10
+  when: not ansible_check_mode

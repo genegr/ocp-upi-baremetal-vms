@@ -4,6 +4,10 @@
     log
     errors
 }
+{% for fz in c.infra.dns.forward_zones %}
+
+{{ lookup('ansible.builtin.template', 'Corefile.forward.j2', template_vars={'fz': fz}) | trim }}
+{% endfor %}
 
 . {
     forward . {{ c.infra.dns.forwarders | join(' ') }}

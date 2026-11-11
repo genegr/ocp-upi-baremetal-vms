@@ -29,7 +29,19 @@ Everything runs from the toolbox on the jump box (prefix in the `ocp-upi-deploy`
 | `node` | MachineConfig, so the MCO reboots each node in turn (~10-15 min per node; background it). Ends with a per-node check: unique NQN, multipath and udev files, `nvme_tcp` |
 | `flasharray` | creates realm, pod, policy and user on a **shared array**; touches nothing else. A rerun must not create a new token |
 | `portworx` | pinned operator CSV (Manual approval) + StorageCluster + StorageClass |
-| `smoke` | `-e storage_smoke_test=true`: PVC + Pod + volume found in `<realm>::<pod>`, then cleanup |
+| `smoke` | `-e storage_smoke_test=true`: PVC + Pod; the realm pod must grow by the PVC's size; cleanup always runs |
+| `teardown` | only with `--tags teardown`, irreversible: **ask the user every time**, `--check` first and show the plan it prints. It uninstalls Portworx (UninstallAndDelete), then removes hosts, realm(s) with pods and volumes, policy and user. Older layouts are passed via `cleanup_realms` / `cleanup_hosts` / `cleanup_users` / `cleanup_policies` |
+
+Transport: `storage.portworx.san_type` picks the node MachineConfig (`99-<role>-pure-nvme-tcp` or `-iscsi`); a
+switch removes the other one in the same run (one rolling reboot) and needs the storage NICs on the new VLANs (`nics`,
+`network`). iSCSI gets `PURE_ISCSI_ALLOWED_CIDRS` from `storage.networks`, so Portworx ignores unreachable portals.
+
+Modes: `storage.portworx.mode: csi` (PX-CSI only) or `enterprise`. In enterprise mode Portworx builds a Kube Datastore
+per FlashArray automatically (`pxctl kubedatastore list`) and the operator adds `px-rwx-*-kubevirt-<array>` classes
+pinned to it (`kube_datastore_affinity`). Enterprise means Portworx Enterprise on FlashArray
+cloud drives in the realm pod, plus the PX-CSI integration for FADA volumes. The integration is one-way and needs
+`vault_px_activation_code`. Day-2 operators such as OpenShift Virtualization and ACM go in `addons:` and are applied
+with `playbooks/addons.yml`.
 
 ## Triage
 - `playbooks/status.yml` reports policies, StorageCluster phase, the CSI driver per node, the StorageClass and realm
@@ -38,4 +50,7 @@ Everything runs from the toolbox on the jump box (prefix in the `ocp-upi-deploy`
   user token, realm name).
 - Volume created but the Pod can't attach: the data path (addresses, MTU, portal reachability), multipathd, and a
   unique hostnqn per node (identical NQNs make every node one host on the array).
+- Portworx Enterprise nodes stuck Initializing / "Storage less node detected": look for the first provision attempt in
+  the node journal (`journalctl -t portworx`). "failed to execute nvme cmd" with a portal-less target means the array
+  also serves NVMe-FC: switch `san_type` to `ISCSI` (see CLAUDE.md).
 - Never use the array-admin token in the cluster, and never reuse another cluster's realm or user.

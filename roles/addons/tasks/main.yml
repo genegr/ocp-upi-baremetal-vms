@@ -1,0 +1,9 @@
+---
+# Day-2 operators from the cluster config (`addons:`), in order: each pinned to an exact CSV with Manual approval
+# (olm_operator), then its instance CR and a wait until it is ready.
+- name: Addon
+  ansible.builtin.include_tasks: addon.yml
+  loop: "{{ c.addons }}"
+  loop_control:
+    loop_var: addon
+    label: "{{ addon.name }}"

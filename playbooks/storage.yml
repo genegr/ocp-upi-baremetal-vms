@@ -4,10 +4,14 @@
 #   nics       add the storage NICs (roles.<role>.extra_networks) one node at a time (rolling_update)
 #   network    NMState operator + static storage IPs on those NICs (storage.networks)
 #   node       MachineConfig: multipath/udev, iscsid/multipathd, nvme_tcp, unique NVMe host NQN (rolling reboot)
-#   flasharray realm (+quota), pod, management-access policy, realm user + API token (needs vault_flasharray_api_token)
+#   flasharray realm (+quota), pod, management-access policy, realm user + API token (admin token: storage.flasharray.token_var)
 #   portworx   PX-CSI operator (pinned), px-pure-secret, StorageCluster, StorageClass
 #   smoke      opt-in end-to-end check: -e storage_smoke_test=true
 #   ansible-playbook playbooks/storage.yml -e cluster=<name> [--tags network] [-e rolling_yes=true]
+# Teardown (irreversible, only with --tags teardown): uninstall Portworx (UninstallAndDelete wipes the nodes and its
+# cloud drives), then remove the cluster's FlashArray hosts, realm(s) with pods and volumes, policy and user.
+#   ansible-playbook playbooks/storage.yml -e cluster=<name> --tags teardown [-e confirm=<name>] [-e teardown_cluster=false]
+#   older layouts: -e '{"cleanup_realms": [...], "cleanup_hosts": [...], "cleanup_users": [], "cleanup_policies": []}'
 - name: Cluster model
   hosts: localhost
   gather_facts: false
@@ -83,3 +87,77 @@
           tags: smoke
       tags: smoke
       when: px.enabled and storage_smoke_test | default(false) | bool
+
+- name: Storage teardown
+  hosts: localhost
+  gather_facts: false
+  tags: [never, teardown]
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+  vars:
+    fa: "{{ c.storage.flasharray }}"
+    px: "{{ c.storage.portworx }}"
+  tasks:
+    - name: Type the cluster name to remove its Portworx install and FlashArray objects
+      ansible.builtin.pause:
+        prompt: "Type '{{ c.cluster.name }}' to uninstall Portworx and delete its FlashArray realm, hosts and volumes"
+      register: typed
+      when: confirm is not defined
+
+    - name: The name matches
+      ansible.builtin.assert:
+        that: (confirm | default(typed.user_input | default(''))) == c.cluster.name
+        fail_msg: aborted
+        quiet: true
+
+    - name: Uninstall Portworx
+      when: teardown_cluster | default(true) | bool
+      block:
+        - name: StorageClusters
+          kubernetes.core.k8s_info:
+            api_version: core.libopenstorage.org/v1
+            kind: StorageCluster
+            namespace: "{{ px.namespace }}"
+          register: storageclusters
+
+        - name: Delete strategy wipes nodes and cloud drives
+          kubernetes.core.k8s:
+            api_version: core.libopenstorage.org/v1
+            kind: StorageCluster
+            namespace: "{{ px.namespace }}"
+            name: "{{ item.metadata.name }}"
+            state: patched
+            definition:
+              spec:
+                deleteStrategy:
+                  type: UninstallAndDelete
+          loop: "{{ storageclusters.resources }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+
+        - name: Delete the StorageCluster
+          kubernetes.core.k8s:
+            api_version: core.libopenstorage.org/v1
+            kind: StorageCluster
+            namespace: "{{ px.namespace }}"
+            name: "{{ item.metadata.name }}"
+            state: absent
+          loop: "{{ storageclusters.resources }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+
+        - name: Uninstall finished (the operator's wiper removes the finalizer at the end)
+          kubernetes.core.k8s_info:
+            api_version: core.libopenstorage.org/v1
+            kind: StorageCluster
+            namespace: "{{ px.namespace }}"
+          register: storageclusters_left
+          until: storageclusters_left.resources | length == 0
+          retries: 90
+          delay: 20
+          when: not ansible_check_mode
+
+    - name: FlashArray objects
+      ansible.builtin.include_role:
+        name: flasharray_cleanup

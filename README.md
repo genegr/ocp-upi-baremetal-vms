@@ -111,7 +111,7 @@ Other playbooks:
 | Playbook | Does |
 |----------|------|
 | `playbooks/status.yml` | read-only health report (DNS, HAProxy pools, VMs, cluster); fails on any FAIL |
-| `playbooks/infra.yml` | DNS + HAProxy only (`--tags dns`/`lb`, `-e infra_state=absent`) |
+| `playbooks/infra.yml` | DNS + HAProxy only (`--tags dns`/`lb`, `-e infra_state=absent`); `--tags dns_forward` applies only the opt-in `infra.dns.forward_zones` (zones forwarded to their own DNS servers, e.g. a source vCenter's) |
 | `playbooks/users.yml` | HTPasswd users and roles from `clusters/<name>.htpasswd.yml` |
 | `playbooks/rolling_update.yml` | memory/CPU/nested-virt changes, one node at a time (drain, apply, reboot, uncordon) |
 | `playbooks/destroy.yml` | VMs + ISOs (asks for the cluster name; `-e destroy_infra=true` also removes DNS/HAProxy) |
@@ -208,14 +208,68 @@ tb ansible-playbook playbooks/storage.yml -e cluster=<name> --tags smoke -e stor
 |---|---|
 | `nics` | adds the data NICs, one node at a time (drain, apply, Ready, uncordon) |
 | `network` | NMState operator (pinned CSV, manual approval); one `NodeNetworkConfigurationPolicy` per node. The interface is found by MAC; static IPv4, no gateway |
-| `node` | one MachineConfig per pool: Pure `multipath.conf` and udev rules, `iscsid`/`multipathd`, `nvme_tcp`, and a **unique NVMe host NQN** per node. The RHCOS image ships one NQN for every node, and the array tells hosts apart by NQN. The MCO reboots the nodes one at a time; a Pod per node then verifies |
+| `node` | one MachineConfig per pool and transport (`99-<role>-pure-nvme-tcp`, `-iscsi`, ...): Pure `multipath.conf` and udev rules and `multipathd` for all; NVMe adds `nvme_tcp` and a **unique NVMe host NQN** per node (the RHCOS image ships one NQN for every node, and the array tells hosts apart by NQN); iSCSI adds `iscsid` (RHCOS generates a unique initiator name). Switching `san_type` removes the other transport's MachineConfig in the same run. The MCO reboots the nodes one at a time; a Pod per node then verifies |
 | `flasharray` | `everpure.flasharray` modules: realm (+quota), pod in the realm, management-access policy. Then `purefa_realm_admin` creates a user with no global role and the policy, plus its API token (kept in `.state/clusters/<name>/`, mode 0600; `-e flasharray_rotate_token=true` replaces it) |
-| `portworx` | PX-CSI operator (pinned CSV, manual approval), `px-pure-secret` with the realm user's token, `StorageCluster`, StorageClass (`pure_block`, realm pod) |
-| `smoke` | a PVC and a Pod that writes and reads it; checks the volume is in `<realm>::<pod>` on the array, then cleans up |
+| `portworx` | Portworx operator (pinned CSV, manual approval), `px-pure-secret` with the realm user's token, `StorageCluster`, StorageClass (`pure_block`, realm pod). In enterprise mode, also the license, and the KubeVirt StorageClasses |
+| `smoke` | a PVC and a Pod that writes and reads it; checks that the realm pod on the array grows by the PVC's size, then cleans up, also after a failed check |
 
 `playbooks/status.yml` adds the storage health: policies, StorageCluster, CSI driver per node, StorageClass, and realm
-usage against its quota. Removing PX-CSI and the realm is manual for now: delete PVCs first, then the StorageCluster,
-then the realm objects on the array.
+usage against its quota.
+
+**Portworx Enterprise** (`storage.portworx.mode: enterprise`). Portworx Enterprise builds its storage pools on
+FlashArray cloud drives in the realm pod: by default a 500 GiB pool drive and a 64 GiB metadata drive per storage
+node. It also enables the PX-CSI integration (`portworx.io/pure-csi-integration`), which takes over the FlashArray
+Direct Access volumes of the `px-fa` class. The integration needs Portworx Enterprise 3.7.0 or later and can't be
+turned off again. Put the activation code in the vault as `vault_px_activation_code`; the `portworx` phase activates it
+while the cluster still runs on the trial license. It also creates `px-rwx-block-kubevirt` (3 replicas, the default
+class for VM disks, so live migration works) and `px-rwx-file-kubevirt`. Over NVMe/TCP, the `node` MachineConfig
+also turns RHCOS's native NVMe multipath off (`nvme_core.multipath=N`): Portworx Enterprise's cloud drives need
+dm-multipath and won't start otherwise.
+
+**Teardown** (irreversible, only with `--tags teardown`, confirmed like `destroy.yml`):
+1. Delete the StorageCluster. Its `UninstallAndDelete` strategy wipes the nodes and the cloud drives.
+2. Remove the cluster's hosts on the array (connections first).
+3. Remove its realm with the pods and volumes, eradicated.
+4. Remove its policy, its user and the stored token.
+
+A different or older layout is passed explicitly:
+
+```bash
+tb ansible-playbook playbooks/storage.yml -e cluster=<name> --tags teardown --check \
+  -e '{"cleanup_realms": ["old-realm"], "cleanup_hosts": ["worker0-old"], "cleanup_users": [], "cleanup_policies": []}'
+```
+
+Run it before `destroy.yml` while the cluster is still up, or with `-e teardown_cluster=false` when it's already gone.
+
+## Optional: operators (OpenShift Virtualization, ACM, ...)
+
+List them under `addons:` (see `cluster.example.yaml`), then run `tb ansible-playbook playbooks/addons.yml -e
+cluster=<name>`. Each operator is pinned to an exact CSV, and only the InstallPlan for that CSV is approved. Then the
+instance CR is created (HyperConverged, MultiClusterHub, ...) and the play waits until it's ready. For OpenShift
+Virtualization, also set `roles.worker.nested_virt: true` and give the workers 64 GB or more. An operator its
+instance installs itself (ACM's MultiClusterHub installs multicluster-engine with ACM's Manual approval) is listed under
+`approve_installplans`, so exactly its pinned CSV is approved too.
+
+## Optional: VM migration from vSphere (MTV, FlashArray copy offload)
+
+The Migration Toolkit for Virtualization is an addon (`mtv-operator`, with a ForkliftController that has
+`feature_copy_offload: "true"`). `playbooks/migration.yml` then sets up a vSphere source under `migration:` (see
+`cluster.example.yaml`). With `copy_offload`, ESXi clones each VMDK with `vmkfstools` into a FlashArray Direct Access
+volume and the array does the copy (XCOPY), so the data never crosses the network. In Portworx Enterprise mode, the
+Portworx post-migration hook then moves each disk onto a Portworx volume (`pxd_storageclass`, 3 replicas,
+live-migratable). Requirements of XCOPY (Portworx "Rapid migration of VMs using XCOPY"): a SCSI transport (iSCSI or
+FC; no NVMe), and the source datastore, the FADA volumes and the Portworx cloud drives on the same array, in the same
+realm and pod. So the VMs to migrate go on a migration datastore whose volume lives in the cluster's realm pod.
+
+| Tag | What it does |
+|---|---|
+| `array` | gives the ESXi hosts and their host group (array-level objects) access to the cluster's realm (`purefa_resource_access`, like `purehost access create --realm`), creates each migration datastore volume in the realm pod and connects it to the host group |
+| `vsphere` | creates the MTV role (MTV's minimum privileges + copy offload), the SSO user `mtv-<cluster>@<sso_domain>` (random password in `.state/`), the permission on the datacenter, and the VMFS datastores |
+| `mtv` | provider (no VDDK; ESXi clone method SSH), FlashArray secret (realm user's token, `PURE_CLUSTER_PREFIX` = `<realm>::<pod>::px_<cluster UID[:8]>`), MTV's SSH key on the clone hosts (added through vCenter, restricted to Pure's `vmkfstools` wrapper, checked), storage map (FADA class, XCOPY, `dedicatedMigrationHosts`), network map, Portworx hook resources, plans |
+
+Plans are created and validated, not started: start one from the console (Migration > Plans) or with a `Migration`
+CR. Measured in the lab (30 GiB Ubuntu VM): about 1 min disk transfer, 4.5 min guest conversion, 3.5 min Portworx hook.
+Without the hook (`portworx_hook: false`) the VM stays on its FADA volumes: shorter, with array-native data services.
 
 ## How a node installs
 
@@ -237,13 +291,17 @@ copies `.state/` or `clusters/vault.yml`. tar doesn't delete, so remove deleted 
 ```
 compose.yaml, docker/          toolbox image (everything pinned), host networking
 ansible.cfg, inventory/        localhost; the infra host is added at run time from the cluster config
-playbooks/                     deploy, infra, users, rolling_update, storage, status, destroy, tools/oc
+playbooks/                     deploy, infra, users, rolling_update, storage, addons, migration, status, destroy,
+                               tools/oc
 roles/                         cluster_model tools infra preflight ignition isos vms bootstrap csr install_complete
                                htpasswd rolling_update status olm_operator storage_network storage_node
-                               flasharray_realm portworx storage_smoke
+                               flasharray_realm flasharray_cleanup portworx storage_smoke addons
+                               migration_array migration_vsphere migration_mtv
 plugins/filter/                cluster_model (validate + derive), htpasswd (bcrypt), k8s (conditions, NMState)
 plugins/modules/               ocp_csr_approve (no upstream module approves CSRs), purefa_realm_admin (realm user:
-                               no module of everpure.flasharray 1.45 makes a policy-only user)
+                               no module of everpure.flasharray 1.45 makes a policy-only user), purefa_resource_access
+                               (realm access of array-level hosts), purefa_volume_info (volume serial without the
+                               Purity 6.12 volumes bug)
 platforms/<name>/              OpenTofu module + Ansible task files per hypervisor (contract: platforms/README.md)
 clusters/                      configs, user lists, vault (gitignored; examples tracked)
 tests/                         filter unit tests (python3 tests/filters_test.py, in the toolbox)

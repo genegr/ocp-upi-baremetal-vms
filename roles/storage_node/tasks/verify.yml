@@ -1,6 +1,7 @@
 ---
 # One short-lived Pod per storage node (the release's own tools image, read-only host mounts) reports the host's NVMe
-# NQN, whether the MachineConfig files are in place and whether nvme_tcp is loaded. Verification only: the Pods are
+# NQN and iSCSI IQN, whether the MachineConfig files are in place, which units are enabled and whether nvme_tcp is
+# loaded. Only /etc is mounted: unit links point into /usr/lib, so they are tested as links (ls), never followed. Verification only: the Pods are
 # created and removed on every run, so these tasks never report a change.
 - name: Tools image of this release
   kubernetes.core.k8s_info:
@@ -53,10 +54,13 @@
             command: [sh, -c]
             args:
               - >-
-                echo "hostnqn=$(cat /host/etc/nvme/hostnqn)";
+                echo "hostnqn=$(cat /host/etc/nvme/hostnqn 2>/dev/null)";
+                echo "iqn=$(sed -n 's/^InitiatorName=//p' /host/etc/iscsi/initiatorname.iscsi 2>/dev/null)";
+                echo "iscsid=$(ls /host/etc/systemd/system/*.wants/iscsid.service >/dev/null 2>&1 && echo enabled || echo disabled)";
                 echo "multipath_conf=$(test -s /host/etc/multipath.conf && echo yes || echo no)";
                 echo "udev_rules=$(test -s /host/etc/udev/rules.d/99-pure-storage.rules && echo yes || echo no)";
-                echo "nvme_tcp=$(test -d /sys/module/nvme_tcp && echo yes || echo no)"
+                echo "nvme_module=$(test -d /sys/module/{{ 'nvme_rdma' if c.storage.transport == 'nvme-rdma' else 'nvme_tcp' }} && echo yes || echo no)";
+                echo "nvme_multipath=$(cat /sys/module/nvme_core/parameters/multipath 2>/dev/null || echo none)"
             securityContext:
               privileged: true
             volumeMounts:
@@ -101,14 +105,22 @@
     storage_node_facts: >-
       {{ dict(storage_nodes | map(attribute='name') | zip(check_log.results | map(attribute='log_lines') | map('kv_lines'))) }}
 
-- name: Every node is ready for PX-CSI (unique NVMe host NQN, multipath + udev config, nvme_tcp)
+- name: Every node is ready for {{ c.storage.transport }} (multipath + udev config; unique host NQN or IQN)
   ansible.builtin.assert:
     that:
-      - storage_node_facts.values() | map(attribute='hostnqn') | unique | length == storage_nodes | length
-      - storage_node_facts.values() | map(attribute='hostnqn') | select('match', '^nqn\.') | list | length == storage_nodes | length
       - storage_node_facts.values() | map(attribute='multipath_conf') | unique == ['yes']
       - storage_node_facts.values() | map(attribute='udev_rules') | unique == ['yes']
-      - storage_node_facts.values() | map(attribute='nvme_tcp') | unique == ['yes']
+      - not (nvme or iscsi) or storage_node_facts.values() | map(attribute=host_id) | unique | length == storage_nodes | length
+      - not (nvme or iscsi)
+        or storage_node_facts.values() | map(attribute=host_id) | select('match', '^(nqn|iqn)\.') | list | length == storage_nodes | length
+      - not nvme or storage_node_facts.values() | map(attribute='nvme_module') | unique == ['yes']
+      - not nvme or storage_node_facts.values() | map(attribute='nvme_multipath') | unique
+        == [('N' if 'nvme_core.multipath=N' in c.storage.kernel_args else 'Y')]
+      - not iscsi or storage_node_facts.values() | map(attribute='iscsid') | unique == ['enabled']
     fail_msg: "{{ storage_node_facts | to_json }}"
     success_msg: "{{ storage_node_facts | dict2items | map(attribute='key')
-                     | zip(storage_node_facts.values() | map(attribute='hostnqn')) | map('join', ' ') | list }}"
+                     | zip(storage_node_facts.values() | map(attribute=host_id)) | map('join', ' ') | list }}"
+  vars:
+    nvme: "{{ c.storage.transport.startswith('nvme') }}"
+    iscsi: "{{ c.storage.transport == 'iscsi' }}"
+    host_id: "{{ 'iqn' if iscsi else 'hostnqn' }}"

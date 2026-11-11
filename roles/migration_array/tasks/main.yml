@@ -1,0 +1,39 @@
+---
+# FlashArray side of MTV copy offload. XCOPY works only when the source VMFS datastore, the temporary FADA volumes and
+# (enterprise mode) the Portworx cloud drives are in the same realm and pod. So:
+#   1. the ESXi hosts and their host group (array-level objects) get access to the cluster's realm
+#      (purefa_resource_access = purehost access create --realm); a realm volume can be connected to an array-level
+#      host group only with the group's own access ("Connection outside of the realm without resource access").
+#   2. each migration datastore is a volume in the realm pod, connected to that host group.
+# The admin token (storage.flasharray.token_var) is used; it never leaves the toolbox.
+- name: Realm access of the ESXi hosts
+  purefa_resource_access:
+    fa_url: "{{ fa.endpoint }}"
+    api_token: "{{ fa_admin_token }}"
+    resource: "{{ item }}"
+    resource_type: hosts
+    realms: ["{{ fa.realm }}"]
+  loop: "{{ co.host_access.hosts }}"
+
+- name: Realm access of their host groups
+  purefa_resource_access:
+    fa_url: "{{ fa.endpoint }}"
+    api_token: "{{ fa_admin_token }}"
+    resource: "{{ item }}"
+    resource_type: host-groups
+    realms: ["{{ fa.realm }}"]
+  loop: "{{ co.host_access.host_groups }}"
+
+# purefa_volume (1.45.1) fails on an existing volume on Purity//FA 6.12 (#1103), and purefa_info's volumes subset
+# too: a datastore volume counts as existing when it is connected to its host group (hgroups subset, `vols`).
+- name: Host groups and their volumes
+  everpure.flasharray.purefa_info:
+    gather_subset: [hgroups]
+  register: fa_hg_info
+
+- name: Datastore volumes (created once, then connected to their host group)
+  ansible.builtin.include_tasks: datastore.yml
+  loop: "{{ co.datastores }}"
+  loop_control:
+    loop_var: ds
+    label: "{{ fa.realm }}::{{ fa.pod }}::{{ ds.name }}"

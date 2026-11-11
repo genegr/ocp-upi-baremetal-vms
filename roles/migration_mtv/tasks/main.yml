@@ -1,0 +1,99 @@
+---
+# MTV objects for one vSphere source: provider (no VDDK, ESXi clone method SSH), FlashArray secret for the XCOPY
+# populator, storage and network maps, the Portworx hook (enterprise mode) and plans. MTV itself is an addon.
+# The ESXi clone hosts get MTV's own SSH key (generated with the provider), restricted to Pure's vmkfstools wrapper,
+# through vCenter (govc host.esxcli system ssh key add): no root password, the hosts' other keys untouched.
+- name: MTV is installed (ForkliftController)
+  kubernetes.core.k8s_info:
+    api_version: forklift.konveyor.io/v1beta1
+    kind: ForkliftController
+    namespace: "{{ m.namespace }}"
+  register: forklift
+  failed_when: forklift.resources | default([]) | length == 0
+
+- name: Copy offload is on in MTV
+  ansible.builtin.assert:
+    that: (forklift.resources[0].spec.feature_copy_offload | default('false') | string | lower) == 'true'
+    fail_msg: "set feature_copy_offload: \"true\" on the ForkliftController (the mtv addon's instance)"
+    quiet: true
+  when: co.enabled
+
+- name: Portworx hook resources
+  ansible.builtin.include_tasks: portworx_hook.yml
+  when: co.enabled and co.portworx_hook
+
+- name: Destination provider (the local cluster)
+  kubernetes.core.k8s_info:
+    api_version: forklift.konveyor.io/v1beta1
+    kind: Provider
+    namespace: "{{ m.namespace }}"
+  register: mtv_providers
+
+- name: Destination provider name
+  ansible.builtin.set_fact:
+    host_provider: "{{ mtv_providers.resources | selectattr('spec.type', 'eq', 'openshift') | map(attribute='metadata.name') | first | default('host') }}"
+
+- name: Provider secret {{ src.name }}-credentials
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ src.name }}-credentials"
+        namespace: "{{ m.namespace }}"
+        labels: {createdForProviderType: vsphere, createdForResourceType: providers}
+      type: Opaque
+      data:
+        user: "{{ (src.user ~ '@' ~ src.sso_domain) | b64encode }}"
+        password: "{{ (lookup('ansible.builtin.file', mtv_vc_password_file) ~ 'Aa1!') | b64encode }}"
+        insecureSkipVerify: "{{ (src.insecure | string | lower) | b64encode }}"
+        url: "{{ ('https://' ~ src.server ~ '/sdk') | b64encode }}"
+  no_log: true
+
+- name: Provider {{ src.name }}
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: Provider
+      metadata: {name: "{{ src.name }}", namespace: "{{ m.namespace }}"}
+      spec:
+        type: vsphere
+        url: "https://{{ src.server }}/sdk"
+        secret: {name: "{{ src.name }}-credentials", namespace: "{{ m.namespace }}"}
+        settings: "{{ {'sdkEndpoint': 'vcenter'} | combine({'esxiCloneMethod': 'ssh'} if co.enabled else {}) }}"
+
+- name: Provider {{ src.name }} ready (inventory loaded)
+  kubernetes.core.k8s_info:
+    api_version: forklift.konveyor.io/v1beta1
+    kind: Provider
+    namespace: "{{ m.namespace }}"
+    name: "{{ src.name }}"
+  register: provider
+  until: provider.resources | length == 1 and provider.resources[0] | k8s_condition('Ready') == 'True'
+  retries: 30
+  delay: 10
+  when: not ansible_check_mode
+
+- name: Copy offload
+  ansible.builtin.include_tasks: copy_offload.yml
+  when: co.enabled
+
+- name: NetworkMap {{ src.name }}-net
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: NetworkMap
+      metadata: {name: "{{ src.name }}-net", namespace: "{{ m.namespace }}"}
+      spec:
+        provider:
+          source: {name: "{{ src.name }}", namespace: "{{ m.namespace }}"}
+          destination: {name: "{{ host_provider }}", namespace: "{{ m.namespace }}"}
+        map: "{{ m.network_map_spec }}"
+  when: m.network_map | length > 0
+
+- name: Plans (validated, not started)
+  ansible.builtin.include_tasks: plan.yml
+  loop: "{{ m.plans }}"
+  loop_control:
+    loop_var: plan
+    label: "{{ plan.name }}"

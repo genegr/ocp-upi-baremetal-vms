@@ -1,0 +1,103 @@
+---
+# Portworx Enterprise extras: every storage node Online, the PX-CSI integration up (it serves the Direct Access
+# volumes), the license, and the replicated StorageClasses for OpenShift Virtualization.
+- name: Storage nodes Online
+  kubernetes.core.k8s_info:
+    api_version: core.libopenstorage.org/v1
+    kind: StorageNode
+    namespace: "{{ px.namespace }}"
+    name: "{{ item.hostname }}"
+  register: px_node
+  until: (px_node.resources[0].status.phase | default('')) == 'Online'
+  retries: 60
+  delay: 20
+  loop: "{{ storage_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: not ansible_check_mode
+
+- name: PX-CSI integration (FlashArray/FlashBlade driver)
+  when: px.enterprise.csi_integration and not ansible_check_mode
+  block:
+    - name: px-pure-csi-node on every storage node
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: DaemonSet
+        namespace: "{{ px.namespace }}"
+        name: px-pure-csi-node
+      register: pure_csi_ds
+      until: >-
+        pure_csi_ds.resources | length == 1
+        and (pure_csi_ds.resources[0].status.numberReady | default(0)) >= storage_nodes | length
+      retries: 60
+      delay: 10
+
+    - name: PureStorageCluster Running
+      kubernetes.core.k8s_info:
+        api_version: core.libopenstorage.org/v1
+        kind: PureStorageCluster
+        namespace: "{{ px.namespace }}"
+        name: "px-{{ c.cluster.name }}"
+      register: pure_sc
+      until: (pure_sc.resources[0].status.phase | default('')) == 'Running'
+      retries: 60
+      delay: 10
+
+# pxctl has no Ansible module: it runs inside a Portworx pod through the Kubernetes API (k8s_exec), read first and
+# activated only when the cluster still runs on the trial license. The code comes from the vault and is never logged.
+- name: License
+  when: not ansible_check_mode
+  block:
+    - name: A Portworx pod
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ px.namespace }}"
+        label_selectors: [name=portworx]
+        field_selectors: [status.phase=Running]
+      register: px_pods
+
+    - name: Current license
+      kubernetes.core.k8s_exec:
+        namespace: "{{ px.namespace }}"
+        pod: "{{ px_pods.resources[0].metadata.name }}"
+        container: portworx
+        command: /opt/pwx/bin/pxctl license list
+      register: px_license
+      changed_when: false
+
+    - name: Activate the license from the vault
+      kubernetes.core.k8s_exec:
+        namespace: "{{ px.namespace }}"
+        pod: "{{ px_pods.resources[0].metadata.name }}"
+        container: portworx
+        command: "/opt/pwx/bin/pxctl license activate {{ vault_px_activation_code }}"
+      no_log: true
+      when: vault_px_activation_code is defined and px_trial
+
+    - name: Licensed (or knowingly on trial)
+      ansible.builtin.debug:
+        msg: "{{ px_license.stdout_lines | select('search', 'Product SKU|LICENSE EXPIRES') | list }}"
+  vars:
+    px_trial: "{{ px_license.stdout_lines | default([]) | select('search', '^Product SKU.*Trial') | list | length > 0 }}"
+
+- name: StorageClasses for OpenShift Virtualization (3 replicas; Block RWX for live migration)
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: "{{ item.name }}"
+        annotations: "{{ item.annotations | default({}) }}"
+      provisioner: pxd.portworx.com
+      parameters: "{{ item.parameters }}"
+      reclaimPolicy: Delete
+      volumeBindingMode: Immediate
+      allowVolumeExpansion: true
+  loop:
+    # The default class for VM disks (OpenShift Virtualization picks the class with this annotation).
+    - {name: px-rwx-block-kubevirt, parameters: {repl: "3"},
+       annotations: {storageclass.kubevirt.io/is-default-virt-class: "true"}}
+    - {name: px-rwx-file-kubevirt, parameters: {repl: "3", sharedv4: "true", sharedv4_mount_options: "vers=3.0,nolock"}}
+  loop_control:
+    label: "{{ item.name }}"
+  when: px.enterprise.kubevirt_storageclasses and (not ansible_check_mode or olm_csv_ready)

@@ -5,9 +5,17 @@
 - name: Platform credentials
   ansible.builtin.include_tasks: "{{ platform_dir }}/tasks/credentials.yml"
 
+# The flags (bootstrap_enabled, attach_iso) describe where an existing deployment is in its lifecycle. With no
+# managed resources in the state (never deployed, or destroyed) there is no deployment: flags left by an earlier
+# cluster (bootstrap gone, ISOs detached) would create one with no bootstrap VM and no install media.
 - name: Current OpenTofu flags
   ansible.builtin.set_fact:
-    tofu_flags_current: "{{ lookup('ansible.builtin.file', tfvars_file, errors='ignore') | default('{}', true) | from_json }}"
+    tofu_flags_current: >-
+      {{ (lookup('ansible.builtin.file', tfvars_file, errors='ignore') | default('{}', true) | from_json)
+         if deployed else {} }}
+  vars:
+    tofu_state: "{{ lookup('ansible.builtin.file', cdir ~ '/terraform.tfstate', errors='ignore') | default('{}', true) | from_json }}"
+    deployed: "{{ tofu_state.resources | default([]) | selectattr('mode', 'eq', 'managed') | list | length > 0 }}"
 
 - name: OpenTofu inputs
   ansible.builtin.copy:

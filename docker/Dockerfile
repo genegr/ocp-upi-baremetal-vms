@@ -9,13 +9,19 @@ ARG FEDORA_IMAGE=registry.fedoraproject.org/fedora:44
 # --- static binaries --------------------------------------------------------
 FROM ${FEDORA_IMAGE} AS bins
 ARG TOFU_VERSION=1.13.1
-RUN dnf -y install --setopt=install_weak_deps=False curl unzip && dnf clean all
+# govc: vCenter SSO users (sso.user.*), which no Ansible module manages (MTV's vCenter account).
+ARG GOVC_VERSION=0.56.2
+RUN dnf -y install --setopt=install_weak_deps=False curl unzip tar gzip && dnf clean all
 WORKDIR /dl
 RUN set -eux; \
     curl -fsSLO "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_amd64.zip"; \
     curl -fsSLO "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_SHA256SUMS"; \
     sha256sum -c --ignore-missing "tofu_${TOFU_VERSION}_SHA256SUMS"; \
     mkdir -p /out; unzip -o "tofu_${TOFU_VERSION}_linux_amd64.zip" tofu -d /out; \
+    curl -fsSLO "https://github.com/vmware/govmomi/releases/download/v${GOVC_VERSION}/govc_Linux_x86_64.tar.gz"; \
+    curl -fsSL -o govc_checksums.txt "https://github.com/vmware/govmomi/releases/download/v${GOVC_VERSION}/checksums.txt"; \
+    sha256sum -c --ignore-missing govc_checksums.txt; \
+    tar -xzf govc_Linux_x86_64.tar.gz -C /out govc; \
     chmod 0755 /out/*
 
 # --- toolbox ----------------------------------------------------------------

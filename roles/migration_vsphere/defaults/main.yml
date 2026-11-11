@@ -1,0 +1,25 @@
+---
+# vCenter privileges of the MTV role: Red Hat's minimum for MTV (VMware prerequisites) plus the storage copy offload
+# ones (the StorageOffloader role: Global.Settings, Host.Config.AdvancedConfig/Patch/Storage).
+migration_vcenter_privileges:
+  - VirtualMachine.Interact.PowerOff
+  - VirtualMachine.Interact.PowerOn
+  - VirtualMachine.GuestOperations.Modify
+  - VirtualMachine.GuestOperations.Execute
+  - VirtualMachine.GuestOperations.Query
+  - VirtualMachine.Provisioning.DiskRandomAccess
+  - VirtualMachine.Provisioning.FileRandomAccess
+  - VirtualMachine.Provisioning.DiskRandomRead
+  - VirtualMachine.Provisioning.GetVmFiles
+  - VirtualMachine.Provisioning.PutVmFiles
+  - VirtualMachine.Provisioning.Clone
+  - VirtualMachine.Provisioning.MarkAsTemplate
+  - VirtualMachine.State.CreateSnapshot
+  - VirtualMachine.State.RemoveSnapshot
+  - Datastore.Browse
+  - Datastore.FileManagement
+  - Sessions.ValidateSession
+  - Global.Settings
+  - Host.Config.AdvancedConfig
+  - Host.Config.Patch
+  - Host.Config.Storage

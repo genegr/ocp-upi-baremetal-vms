@@ -96,6 +96,11 @@ infra:
     #   container: coredns
     #   legacy_zone_file: db.example.com          # optional: comment out this cluster's old records there
     # verify_names: [www.redhat.com]  # names that must still resolve after a DNS change
+    # Optional: other zones to forward to their own DNS servers (e.g. a source vCenter's zone for VM migration).
+    # Shared mode: one marked Corefile block per zone, applied alone with `infra.yml --tags dns_forward`; never
+    # removed on destroy (other clusters may use it). probe: a name in the zone that must resolve after a change.
+    # forward_zones:
+    #   - {zone: lab.example.com, servers: [192.0.2.53], probe: vcenter.lab.example.com}
   extra_records: []                   # extra A records in the cluster zone, e.g. [{name: worker3, ip: 192.0.2.57}]
   haproxy:
     stats_user: admin
@@ -123,6 +128,7 @@ identity:
 #     #   mtu: 1500 (default)
 #   flasharray:
 #     endpoint: 192.0.2.40            # management address
+#     token_var: vault_flasharray_api_token   # vault variable with this array's admin API token
 #     validate_certs: false
 #     realm: ""                       # default: the cluster name
 #     quota: ""                       # e.g. 10T (empty = no realm quota)
@@ -137,6 +143,81 @@ identity:
 #     # operator_csv: portworx-operator.v26.4.0
 #     # image: portworx/px-pure-csi-driver:26.3.0
 #     storageclass: {name: px-fa, default: false}
+#     mode: csi                       # csi: PX-CSI only | enterprise: Portworx Enterprise (pools on FlashArray
+#                                     #   cloud drives in the realm pod) + the PX-CSI integration for FADA volumes
+#     # enterprise:                   # enterprise mode only (defaults shown); needs vault_px_activation_code
+#     #   image: portworx/oci-monitor:3.7.1.1
+#     #   cloud_drive_gib: 500          # pool drive per storage node
+#     #   metadata_drive_gib: 64
+#     #   csi_integration: true         # portworx.io/pure-csi-integration (PX >= 3.7.0; cannot be reverted)
+#     #   misc_args: "-T px-storev2"
+#     #   kvdb_tls: true
+#     #   telemetry: true
+#     #   kubevirt_storageclasses: true # px-rwx-block-kubevirt (default for VM disks) + px-rwx-file-kubevirt
+
+# Day-2 operators (playbooks/addons.yml), each pinned to an exact CSV with Manual approval, plus an optional instance
+# CR and what to wait for (wait: {type: <condition>, status: "True"} or {phase: <status.phase>}). Off by default.
+# addons:
+#   - name: openshift-virtualization
+#     package: kubevirt-hyperconverged
+#     channel: stable
+#     csv: kubevirt-hyperconverged-operator.v4.22.12
+#     namespace: openshift-cnv
+#     instance:
+#       apiVersion: hco.kubevirt.io/v1beta1
+#       kind: HyperConverged
+#       metadata: {name: kubevirt-hyperconverged, namespace: openshift-cnv}
+#       spec: {}
+#     wait: {type: Available, status: "True"}
+#   - name: acm                      # its MultiClusterHub installs multicluster-engine with ACM's Manual approval:
+#     package: advanced-cluster-management   # approve_installplans approves exactly that pinned CSV
+#     channel: release-2.17
+#     csv: advanced-cluster-management.v2.17.4
+#     namespace: open-cluster-management
+#     instance:
+#       apiVersion: operator.open-cluster-management.io/v1
+#       kind: MultiClusterHub
+#       metadata: {name: multiclusterhub, namespace: open-cluster-management}
+#       spec: {}
+#     approve_installplans:
+#       - {namespace: multicluster-engine, csv: multicluster-engine.v2.17.4}
+#     wait: {phase: Running, retries: 120}
+#   - name: mtv                      # Migration Toolkit for Virtualization, copy offload on
+#     package: mtv-operator
+#     channel: release-v5.0
+#     csv: mtv-operator.v5.0.0
+#     namespace: openshift-mtv
+#     instance:
+#       apiVersion: forklift.konveyor.io/v1beta1
+#       kind: ForkliftController
+#       metadata: {name: forklift-controller, namespace: openshift-mtv}
+#       spec: {olm_managed: true, feature_copy_offload: "true"}
+#     wait: {type: Successful, status: "True", retries: 60}
+
+# VM migration from vSphere with MTV (playbooks/migration.yml; tags array, vsphere, mtv). Off by default.
+# copy_offload: FlashArray XCOPY (needs storage.portworx on ISCSI or FC); the VMs to migrate go on a migration datastore
+# whose volume lives in the cluster's realm pod. Plans are created and validated, never started by the playbook.
+# migration:
+#   enabled: true
+#   source:
+#     name: vcenter1                         # MTV Provider name
+#     server: vcenter1.example.com
+#     datacenter: dc1
+#     sso_domain: vsphere.local              # the vCenter's SSO system domain (the MTV user is created there)
+#     # admin_user_var / admin_password_var: vault variables of an SSO administrator (default vault_vsphere_*)
+#     clone_hosts: [esx01.example.com, esx02.example.com]   # get MTV's SSH key; run the XCOPY clones
+#   copy_offload:
+#     host_access:                           # array-level objects that get access to the cluster's realm
+#       hosts: [esx01-fc, esx02-fc]
+#       host_groups: [esx-fc]
+#     datastores:
+#       - {name: mycluster-mtv-ds01, size: 1T, host_group: esx-fc, vsphere_cluster: cluster1,
+#          format_host: esx01.example.com}
+#     # storageclass: px-fa (FADA target); portworx_hook: true (enterprise mode) -> pxd_storageclass
+#   network_map:
+#     - {source: VM Network, destination: pod}          # or <namespace>/<network-attachment>
+#   plans:
+#     - {name: first-wave, vms: [vm1, vm2], target_namespace: migrated}
 
 tools:
   tofu_version: 1.12.6

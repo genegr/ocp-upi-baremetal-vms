@@ -53,6 +53,10 @@ DEFAULTS = {
             "mode": "managed",
             "listen": [],
             "forwarders": ["1.1.1.1"],
+            # Opt-in: other zones the cluster must resolve, forwarded to their own DNS servers
+            # ([{zone: lab.example, servers: [192.0.2.53], probe: vcenter.lab.example}]), e.g. a source vCenter's zone
+            # for VM migration. probe: a name in the zone that must resolve after a change.
+            "forward_zones": [],
             "image": "coredns/coredns:1.12.0",
             "shared": {
                 "config_dir": "",
@@ -86,8 +90,11 @@ DEFAULTS = {
     # a dedicated FlashArray realm + user, and Portworx CSI (PX-CSI). All opt-in.
     "storage": {
         "networks": [],
+        # kubernetes-nmstate operator for the storage IPs (pinned CSV). A cluster upgraded past it records its CSV here.
+        "nmstate_csv": "kubernetes-nmstate-operator.4.22.0-202609301304",
         "flasharray": {
             "endpoint": "",
+            "token_var": "vault_flasharray_api_token",  # vault variable with this array's admin API token
             "validate_certs": False,
             "realm": "",          # default: the cluster name
             "quota": "",          # e.g. 10T
@@ -98,13 +105,68 @@ DEFAULTS = {
         },
         "portworx": {
             "enabled": False,
+            # csi: PX-CSI only (FlashArray Direct Access volumes). enterprise: Portworx Enterprise with storage pools on
+            # FlashArray cloud drives, plus the PX-CSI integration that takes over the Direct Access (FADA) volumes.
+            "mode": "csi",
             "channel": "stable",
             "operator_csv": "portworx-operator.v26.4.0",
-            "image": "portworx/px-pure-csi-driver:26.3.0",
+            "image": "portworx/px-pure-csi-driver:26.3.0",       # csi mode
             "san_type": "NVMEOF-TCP",
             "namespace": "portworx",
-            "storageclass": {"name": "px-fa", "default": False},
+            "storageclass": {"name": "px-fa", "default": False},  # the FADA StorageClass (both modes)
+            "enterprise": {
+                "image": "portworx/oci-monitor:3.7.1.1",
+                "cloud_drive_gib": 500,          # storage pool drive per node, in the realm pod
+                "metadata_drive_gib": 64,        # system metadata drive per node
+                "csi_integration": True,         # portworx.io/pure-csi-integration (PX >= 3.7.0; cannot be reverted)
+                "misc_args": "-T px-storev2",
+                "kvdb_tls": True,                # internal KVDB over TLS (the operator deploys cert-manager)
+                "telemetry": True,
+                "kubevirt_storageclasses": True,  # px-rwx-block-kubevirt (live migration) + px-rwx-file-kubevirt
+            },
         },
+    },
+    # Day-2 operators (playbooks/addons.yml): each pinned to an exact CSV with Manual approval, plus an optional
+    # instance (the operator's CR) and what to wait for. Empty by default.
+    "addons": [],
+    # Opt-in: VM migration from vSphere with the Migration Toolkit for Virtualization (playbooks/migration.yml; MTV
+    # itself is an addon), with FlashArray XCOPY copy offload into the cluster's realm pod and, in Portworx
+    # Enterprise mode, the Portworx hook that moves the disks onto Portworx volumes.
+    "migration": {
+        "enabled": False,
+        "namespace": "openshift-mtv",
+        "source": {
+            "name": "",               # MTV Provider name, e.g. the vCenter's short name
+            "server": "",             # vCenter FQDN
+            "datacenter": "",
+            "insecure": True,
+            "sso_domain": "vsphere.local",   # the vCenter's SSO system domain (where the MTV user is created)
+            "admin_user_var": "vault_vsphere_user",          # vault variables of an SSO administrator
+            "admin_password_var": "vault_vsphere_password",
+            "user": "",               # default mtv-<cluster>
+            "role": "",               # default MTV-<cluster>
+            "clone_hosts": [],        # ESXi hosts (vCenter names) that get MTV's SSH key and run the XCOPY clones
+        },
+        "copy_offload": {
+            "enabled": True,
+            # Array-level FlashArray objects (the clone hosts as the array names them, and their host group) that get
+            # access to the cluster's realm, so realm volumes can be connected to them.
+            "host_access": {"hosts": [], "host_groups": []},
+            # VMFS datastores on volumes in the realm pod (XCOPY needs source and target in the same realm and pod):
+            # [{name, size: 1T, host_group, vsphere_cluster, format_host}]
+            "datastores": [],
+            "storageclass": "px-fa",                       # FADA target of the XCOPY populator
+            "access_mode": "ReadWriteMany",
+            "volume_mode": "Block",
+            "portworx_hook": True,                         # enterprise mode: move the disks onto Portworx volumes
+            "pxd_storageclass": "px-rwx-block-kubevirt",
+            "hook_image": "docker.io/portworx/fa-pxd-hook:v1.0.1@sha256:"
+                          "b688b7c901437d04ae3e0f09f545e369f914f48aa4abce0389841f9b1609074f",
+            "converter_image": "docker.io/portworx/fa-pxd-converter:v1.0.1@sha256:"
+                               "120cf7b2cd1060d8d72b6d7c732fbfe40061de5cb33cae191caccc1625f78c52",
+        },
+        "network_map": [],            # [{source: <port group name>, destination: pod}]
+        "plans": [],                  # [{name, vms: [names], target_namespace, type: cold}] (started by hand)
     },
 }
 
@@ -289,6 +351,28 @@ def cluster_model(raw, config_path):
         _die("infra.dns.shared.config_dir is required in shared mode")
     if dns["mode"] == "managed" and not dns["listen"]:
         dns["listen"] = list(net["dns_servers"])
+    seen_zones = set()
+    for fz in dns["forward_zones"]:
+        zname = str(fz.get("zone", "")).rstrip(".").lower()
+        if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$", zname):
+            _die(f"infra.dns.forward_zones: '{fz.get('zone')}' is not a DNS zone name")
+        if zname in seen_zones or zname == c["cluster"]["domain"]:
+            _die(f"infra.dns.forward_zones: {zname} is listed twice or is the cluster's own zone")
+        seen_zones.add(zname)
+        servers = fz.get("servers") or []
+        if not servers:
+            _die(f"infra.dns.forward_zones {zname}: servers is empty")
+        for s in servers:
+            try:
+                ipaddress.ip_address(str(s))
+            except ValueError:
+                _die(f"infra.dns.forward_zones {zname}: '{s}' is not an IP address")
+        probe = str(fz.get("probe", "")).rstrip(".").lower()
+        if not probe.endswith("." + zname):
+            _die(f"infra.dns.forward_zones {zname}: probe must be a name in the zone that resolves (checked after a change)")
+        fz["zone"] = zname
+        fz["servers"] = [str(s) for s in servers]
+        fz["probe"] = probe
     if c["infra"]["enabled"]:
         _require(c, "infra.host")
 
@@ -311,6 +395,8 @@ def cluster_model(raw, config_path):
         htp["users_file"] = re.sub(r"\.ya?ml$", "", config_abs) + ".htpasswd.yml"
 
     _storage(c, nodes, net)
+    _addons(c)
+    _migration(c)
     return c
 
 
@@ -364,6 +450,8 @@ def _storage(c, nodes, net):
     fa["realm"] = fa["realm"] or c["cluster"]["name"]
     fa["policy"] = fa["policy"] or f"{fa['realm']}-storage"
     fa["user"] = fa["user"] or f"{c['cluster']['name']}-px"
+    if not re.match(r"^vault_[a-z0-9_]+$", str(fa["token_var"])):
+        _die("storage.flasharray.token_var must name a vault variable (vault_...)")
     for key in ("realm", "pod", "policy", "user"):
         if not re.match(r"^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$", str(fa[key])):
             _die(f"storage.flasharray.{key} '{fa[key]}' must be letters, digits and '-'")
@@ -375,6 +463,127 @@ def _storage(c, nodes, net):
             _die("storage.portworx.san_type must be NVMEOF-TCP, ISCSI, FC or NVMEOF-RDMA")
         if px["san_type"] in ("NVMEOF-TCP", "ISCSI") and not st["networks"]:
             _die(f"storage.portworx.san_type {px['san_type']} needs storage.networks (nodes need a data path)")
+        if px["mode"] not in ("csi", "enterprise"):
+            _die("storage.portworx.mode must be csi or enterprise")
+        if px["mode"] == "enterprise":
+            ent = px["enterprise"]
+            for key in ("cloud_drive_gib", "metadata_drive_gib"):
+                if not isinstance(ent[key], int) or ent[key] <= 0:
+                    _die(f"storage.portworx.enterprise.{key} must be a positive number of GiB")
+            if ent["csi_integration"] and _image_version(ent["image"]) < (3, 7):
+                _die("storage.portworx.enterprise.csi_integration needs Portworx Enterprise 3.7.0 or later "
+                     f"(image {ent['image']})")
+    # The node MachineConfig is per transport (99-<role>-pure-<transport>); the phase removes the other transports'.
+    st["transport"] = {"NVMEOF-TCP": "nvme-tcp", "NVMEOF-RDMA": "nvme-rdma", "ISCSI": "iscsi", "FC": "fc"}.get(
+        px["san_type"], "nvme-tcp")
+    # Kernel arguments for the storage MachineConfig. Portworx Enterprise's FlashArray cloud drives over NVMe-oF need
+    # dm-multipath, so RHCOS's native NVMe multipath goes off (PX refuses to start without it). PX-CSI alone keeps it.
+    nvme_enterprise = px["enabled"] and px["mode"] == "enterprise" and st["transport"].startswith("nvme")
+    st["kernel_args"] = ["nvme_core.multipath=N"] if nvme_enterprise else []
+    # Portworx env. iSCSI: log in only to the array's portals on the storage networks (an array can have iSCSI
+    # interfaces on subnets the nodes don't reach, and a failed login fails the attach).
+    px["env"] = [{"name": "PURE_FLASHARRAY_SAN_TYPE", "value": px["san_type"]}]
+    if st["transport"] == "iscsi" and st["networks"]:
+        px["env"].append({"name": "PURE_ISCSI_ALLOWED_CIDRS", "value": ",".join(sn["cidr"] for sn in st["networks"])})
+
+
+def _image_version(image):
+    """'portworx/oci-monitor:3.7.1.1' -> (3, 7, 1, 1); untagged or non-numeric -> (0,)."""
+    tag = str(image).rsplit(":", 1)[-1] if ":" in str(image) else ""
+    parts = re.findall(r"\d+", tag.split("-", 1)[0])
+    return tuple(int(p) for p in parts) or (0,)
+
+
+def _addons(c):
+    """Validate the addons list: pinned OLM operators with an optional instance CR."""
+    seen = set()
+    for i, a in enumerate(c["addons"]):
+        for key in ("name", "package", "channel", "csv", "namespace"):
+            if not a.get(key):
+                _die(f"addons[{i}]: missing '{key}'")
+        if a["name"] in seen:
+            _die(f"addon {a['name']} defined twice")
+        seen.add(a["name"])
+        a.setdefault("source", "redhat-operators")
+        a.setdefault("all_namespaces", False)
+        inst = a.get("instance")
+        if inst is not None:
+            for key in ("apiVersion", "kind", "metadata"):
+                if not inst.get(key):
+                    _die(f"addon {a['name']}: instance needs '{key}'")
+            a.setdefault("wait", {"type": "Available", "status": "True"})
+        # Operators the instance installs itself (with the parent's Manual approval): pinned CSVs to approve.
+        a.setdefault("approve_installplans", [])
+        for d in a["approve_installplans"]:
+            if not (isinstance(d, dict) and d.get("namespace") and d.get("csv")):
+                _die(f"addon {a['name']}: approve_installplans entries need namespace and csv")
+        if a["approve_installplans"] and inst is None:
+            _die(f"addon {a['name']}: approve_installplans needs an instance (it installs those operators)")
+
+
+def _migration(c):
+    """Validate the migration section and derive its names (MTV user/role, the hook's on/off)."""
+    m = c["migration"]
+    if not m["enabled"]:
+        return
+    src, co = m["source"], m["copy_offload"]
+    for key in ("name", "server", "datacenter"):
+        if not src[key]:
+            _die(f"migration.source.{key} is required")
+    if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", src["name"]):
+        _die("migration.source.name must be a DNS label (it names the MTV Provider)")
+    for key in ("admin_user_var", "admin_password_var"):
+        if not re.match(r"^vault_[a-z0-9_]+$", str(src[key])):
+            _die(f"migration.source.{key} must name a vault variable (vault_...)")
+    src["user"] = src["user"] or f"mtv-{c['cluster']['name']}"
+    src["role"] = src["role"] or f"MTV-{c['cluster']['name']}"
+    px = c["storage"]["portworx"]
+    if co["enabled"]:
+        if not px["enabled"]:
+            _die("migration.copy_offload needs storage.portworx.enabled (FADA target volumes in the realm pod)")
+        if px["san_type"] not in ("ISCSI", "FC"):
+            _die("migration.copy_offload (XCOPY) needs a SCSI transport: storage.portworx.san_type ISCSI or FC")
+        if not src["clone_hosts"]:
+            _die("migration.copy_offload needs migration.source.clone_hosts (ESXi hosts that run the clones)")
+        names = set()
+        for i, ds in enumerate(co["datastores"]):
+            for key in ("name", "size", "host_group", "vsphere_cluster", "format_host"):
+                if not ds.get(key):
+                    _die(f"migration.copy_offload.datastores[{i}]: missing '{key}'")
+            if ds["name"] in names:
+                _die(f"migration datastore {ds['name']} defined twice")
+            names.add(ds["name"])
+            if ds["host_group"] not in co["host_access"]["host_groups"]:
+                _die(f"migration datastore {ds['name']}: host group {ds['host_group']} needs realm access "
+                     "(migration.copy_offload.host_access.host_groups)")
+        # The Portworx hook moves the FADA disks onto Portworx volumes: only with Portworx Enterprise.
+        co["portworx_hook"] = bool(co["portworx_hook"]) and px["mode"] == "enterprise"
+    seen = set()
+    for i, p in enumerate(m["plans"]):
+        if not p.get("name") or not p.get("vms"):
+            _die(f"migration.plans[{i}]: needs name and vms")
+        if p["name"] in seen:
+            _die(f"migration plan {p['name']} defined twice")
+        seen.add(p["name"])
+        p.setdefault("target_namespace", "default")
+        p.setdefault("type", "cold")
+        if p["type"] not in ("cold", "warm"):
+            _die(f"migration plan {p['name']}: type must be cold or warm")
+        if co["enabled"] and p["type"] != "cold":
+            _die(f"migration plan {p['name']}: copy offload migrates cold only")
+    # NetworkMap pairs: destination "pod" or "<namespace>/<NetworkAttachmentDefinition>" (multus).
+    m["network_map_spec"] = []
+    for i, nm in enumerate(m["network_map"]):
+        if not nm.get("source"):
+            _die(f"migration.network_map[{i}]: missing 'source'")
+        dest = nm.setdefault("destination", "pod")
+        if dest == "pod":
+            d = {"type": "pod"}
+        elif re.match(r"^[a-z0-9-]+/[a-z0-9-]+$", str(dest)):
+            d = {"type": "multus", "namespace": dest.split("/")[0], "name": dest.split("/")[1]}
+        else:
+            _die(f"migration.network_map[{i}]: destination must be pod or <namespace>/<network-attachment>")
+        m["network_map_spec"].append({"source": {"name": nm["source"]}, "destination": d})
 
 
 def haproxy_pools(csv_text):

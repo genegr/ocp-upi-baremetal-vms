@@ -94,6 +94,12 @@
   when: vault_file.stat.exists
   no_log: true
 
+# The FlashArray admin token of this cluster's array (storage.flasharray.token_var names its vault variable).
+- name: FlashArray admin token
+  ansible.builtin.set_fact:
+    fa_admin_token: "{{ lookup('ansible.builtin.vars', c.storage.flasharray.token_var, default='') }}"
+  no_log: true
+
 - name: Register the infra host (DNS + HAProxy)
   ansible.builtin.add_host:
     name: infra

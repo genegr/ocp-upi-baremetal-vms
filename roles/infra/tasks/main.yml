@@ -19,6 +19,12 @@
   when: c.infra.dns.mode == 'shared'
   tags: [dns]
 
+# Its own tag: `--tags dns_forward` changes only the forward-zone blocks, not the cluster's zone or records.
+- name: DNS forward zones (shared CoreDNS)
+  ansible.builtin.import_tasks: dns-forward.yml
+  when: c.infra.dns.mode == 'shared' and c.infra.dns.forward_zones | length > 0 and infra_state == 'present'
+  tags: [dns, dns_forward]
+
 - name: DNS (project-managed CoreDNS)
   ansible.builtin.import_tasks: dns-managed.yml
   when: c.infra.dns.mode == 'managed'

@@ -2,12 +2,12 @@
 # Dedicated FlashArray realm for the cluster (secure multi-tenancy, as PX-CSI documents it):
 #   realm (+ quota) -> pod inside the realm -> management-access policy (role scoped to the realm) -> role-less user
 #   that is a member of that policy, with its own API token.
-# The array-admin token (vault_flasharray_api_token) is used only here. The realm user's token is written once to
+# The array-admin token (storage.flasharray.token_var in the vault) is used only here. The realm user's token is written once to
 # .state/clusters/<name>/flasharray-<user>.token; -e flasharray_rotate_token=true replaces it.
 - name: FlashArray admin token is available
   ansible.builtin.assert:
-    that: vault_flasharray_api_token is defined and vault_flasharray_api_token | length > 0
-    fail_msg: "set vault_flasharray_api_token in clusters/vault.yml"
+    that: fa_admin_token | default('') | length > 0
+    fail_msg: "set {{ c.storage.flasharray.token_var }} in clusters/vault.yml"
     quiet: true
   no_log: true
 
@@ -15,7 +15,7 @@
   module_defaults:
     group/everpure.flasharray.everpure.flasharray:
       fa_url: "{{ fa.endpoint }}"
-      api_token: "{{ vault_flasharray_api_token }}"
+      api_token: "{{ fa_admin_token }}"
   vars:
     fa: "{{ c.storage.flasharray }}"
   block:
@@ -46,7 +46,7 @@
     - name: Realm user {{ fa.user }} (no global role, member of {{ fa.policy }})
       purefa_realm_admin:
         fa_url: "{{ fa.endpoint }}"
-        api_token: "{{ vault_flasharray_api_token }}"
+        api_token: "{{ fa_admin_token }}"
         validate_certs: "{{ fa.validate_certs }}"
         name: "{{ fa.user }}"
         policies: ["{{ fa.policy }}"]

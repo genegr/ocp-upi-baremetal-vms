@@ -1,0 +1,24 @@
+---
+# Day-2 operators from the cluster config (`addons:`; e.g. OpenShift Virtualization, ACM), each pinned to an exact CSV
+# with Manual approval, plus its instance CR.
+#   ansible-playbook playbooks/addons.yml -e cluster=<name> [--check]
+- name: Cluster model
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - cluster_model
+  tasks:
+    - name: Addons are configured for this cluster
+      ansible.builtin.assert:
+        that: c.addons | length > 0
+        fail_msg: "{{ cluster }} has no addons section"
+        quiet: true
+
+- name: Addons
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+  roles:
+    - addons

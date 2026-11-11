@@ -1,0 +1,69 @@
+---
+# vSphere side of MTV: a least-privilege account for MTV (role + SSO user + permission on the datacenter) and the
+# VMFS datastores on the realm-pod volumes. Runs with the SSO administrator from the vault (source.admin_*_var).
+# govc is used only where no module exists: sso.user.ls/create (the password goes in as -p: no_log, toolbox only).
+- name: Role {{ src.role }} (MTV minimum privileges + storage copy offload)
+  community.vmware.vmware_local_role_manager:
+    hostname: "{{ src.server }}"
+    username: "{{ vc_admin_user }}"
+    password: "{{ vc_admin_password }}"
+    validate_certs: "{{ not src.insecure }}"
+    local_role_name: "{{ src.role }}"
+    local_privilege_ids: "{{ migration_vcenter_privileges }}"
+    action: set
+    state: present
+
+# The SSO password policy (default) allows at most 20 characters: 16 random + a fixed mix of classes.
+- name: MTV user's password (generated once, .state only)
+  ansible.builtin.set_fact:
+    mtv_vc_password: "{{ lookup('ansible.builtin.password', mtv_vc_password_file, length=16, chars=['ascii_letters', 'digits']) }}Aa1!"
+  no_log: true
+
+- name: Password file mode
+  ansible.builtin.file:
+    path: "{{ mtv_vc_password_file }}"
+    mode: "0600"
+
+- name: SSO users
+  ansible.builtin.command:
+    argv: [govc, sso.user.ls]
+  environment: "{{ govc_env }}"
+  register: sso_users
+  changed_when: false
+
+- name: SSO user {{ src.user }}@{{ src.sso_domain }}
+  ansible.builtin.command:
+    argv: [govc, sso.user.create, -p, "{{ mtv_vc_password }}", -d, "MTV on {{ c.cluster.name }} (ocp-upi)", "{{ src.user }}"]
+  environment: "{{ govc_env }}"
+  when: src.user not in (sso_users.stdout_lines | map('split') | map('first') | list) and not ansible_check_mode
+  register: sso_created
+  failed_when: false
+  no_log: true
+
+- name: SSO user created
+  ansible.builtin.assert:
+    that: sso_created is skipped or sso_created.rc == 0
+    fail_msg: "{{ (sso_created.stderr | default('')) | replace(mtv_vc_password, '***') }}"
+    quiet: true
+
+- name: Role {{ src.role }} for {{ src.user }} on datacenter {{ src.datacenter }} (propagated)
+  community.vmware.vmware_object_role_permission:
+    hostname: "{{ src.server }}"
+    username: "{{ vc_admin_user }}"
+    password: "{{ vc_admin_password }}"
+    validate_certs: "{{ not src.insecure }}"
+    role: "{{ src.role }}"
+    principal: "{{ src.sso_domain | upper }}\\{{ src.user }}"
+    object_name: "{{ src.datacenter }}"
+    object_type: Datacenter
+    recursive: true
+    state: present
+  when: not ansible_check_mode or sso_users.stdout_lines | map('split') | map('first') | select('eq', src.user) | list | length > 0
+
+- name: VMFS datastores on the realm-pod volumes (copy offload)
+  ansible.builtin.include_tasks: datastore.yml
+  loop: "{{ co.datastores }}"
+  loop_control:
+    loop_var: ds
+    label: "{{ ds.name }}"
+  when: co.enabled

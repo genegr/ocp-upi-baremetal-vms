@@ -1,0 +1,62 @@
+---
+# Forward zones (infra.dns.forward_zones) in a shared CoreDNS: one server block per zone, marked by zone, so the zone
+# is resolved through its own DNS servers (e.g. a source vCenter's zone for VM migration). Nothing else in the
+# Corefile changes. The block is shared by every cluster that declares the zone (same content) and is never removed
+# by infra_state=absent: other clusters on the same CoreDNS may still use it. Restart only on a change; a zone whose
+# probe name doesn't resolve afterwards through the shared CoreDNS restores the previous Corefile.
+- name: Shared CoreDNS Corefile
+  ansible.builtin.set_fact:
+    fwd_corefile: "{{ c.infra.dns.shared.config_dir | regex_replace('^~', ansible_facts.env.HOME) }}/Corefile"
+
+- name: Forward zones in the shared CoreDNS
+  block:
+    - name: Corefile server block per forward zone
+      ansible.builtin.blockinfile:
+        path: "{{ fwd_corefile }}"
+        marker: "# {mark} ocp-upi forward {{ item.zone }}"
+        block: "{{ lookup('ansible.builtin.template', 'Corefile.forward.j2', template_vars={'fz': item}) }}"
+        backup: true
+      loop: "{{ c.infra.dns.forward_zones }}"
+      loop_control:
+        label: "{{ item.zone }} -> {{ item.servers | join(', ') }}"
+      register: fwd_blocks
+
+    - name: Restart the shared CoreDNS
+      community.docker.docker_container:
+        name: "{{ c.infra.dns.shared.container }}"
+        state: started
+        restart: true
+      when: fwd_blocks.changed
+
+    - name: Each forward zone's probe name resolves through the shared CoreDNS
+      ansible.builtin.debug:
+        msg: "{{ lookup('community.general.dig', item.probe, '@' ~ c.network.dns_servers[0]) }}"
+      register: fwd_answer
+      until: fwd_answer.msg not in ['NXDOMAIN', '']
+      retries: 10
+      delay: 2
+      delegate_to: localhost
+      loop: "{{ c.infra.dns.forward_zones }}"
+      loop_control:
+        label: "{{ item.probe }}"
+      when: not ansible_check_mode
+
+  rescue:
+    - name: Restore the previous Corefile
+      ansible.builtin.copy:
+        src: "{{ (fwd_blocks.results | selectattr('backup', 'defined') | map(attribute='backup') | select | list)[0] }}"
+        dest: "{{ fwd_corefile }}"
+        remote_src: true
+        mode: preserve
+      when: fwd_blocks.results | default([]) | selectattr('backup', 'defined') | map(attribute='backup') | select | list | length > 0
+
+    - name: Restart the shared CoreDNS with the restored Corefile
+      community.docker.docker_container:
+        name: "{{ c.infra.dns.shared.container }}"
+        state: started
+        restart: true
+      when: fwd_blocks.changed | default(false)
+
+    - name: Report the rollback
+      ansible.builtin.fail:
+        msg: "forward zones failed and the Corefile was rolled back: {{ ansible_failed_result.msg | default(ansible_failed_result) }}"

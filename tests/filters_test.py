@@ -114,6 +114,96 @@ bad = copy.deepcopy(st); bad["storage"]["networks"] = []
 rejects("storage: NVMe/TCP without storage networks", bad, "needs storage.networks")
 bad = copy.deepcopy(st); bad["storage"]["flasharray"]["endpoint"] = ""
 rejects("storage: portworx without a FlashArray endpoint", bad, "needs storage.flasharray.endpoint")
+check("storage: portworx mode defaults to csi", cs["storage"]["portworx"]["mode"] == "csi")
+check("storage: admin token variable defaults to vault_flasharray_api_token",
+      cs["storage"]["flasharray"]["token_var"] == "vault_flasharray_api_token")
+bad = copy.deepcopy(st); bad["storage"]["flasharray"]["token_var"] = "api_token"
+rejects("storage: token_var must name a vault variable", bad, "must name a vault variable")
+ent = copy.deepcopy(std); ent["storage"]["portworx"]["mode"] = "enterprise"
+ce = cluster_model(ent, EXAMPLE)
+check("storage: enterprise defaults (3.7.1.1, 500/64 GiB drives, PX-CSI integration on)",
+      (ce["storage"]["portworx"]["enterprise"]["image"].endswith(":3.7.1.1"),
+       ce["storage"]["portworx"]["enterprise"]["cloud_drive_gib"], ce["storage"]["portworx"]["enterprise"]["metadata_drive_gib"],
+       ce["storage"]["portworx"]["enterprise"]["csi_integration"], ce["storage"]["mc_roles"]) == (True, 500, 64, True, ["worker"]))
+bad = copy.deepcopy(ent); bad["storage"]["portworx"]["mode"] = "hybrid"
+rejects("storage: unknown portworx mode", bad, "mode must be csi or enterprise")
+bad = copy.deepcopy(ent); bad["storage"]["portworx"]["enterprise"] = {"image": "portworx/oci-monitor:3.6.2"}
+rejects("storage: PX-CSI integration needs PX 3.7", bad, "needs Portworx Enterprise 3.7.0")
+bad = copy.deepcopy(ent); bad["storage"]["portworx"]["enterprise"] = {"cloud_drive_gib": 0}
+rejects("storage: cloud drive size must be positive", bad, "positive number of GiB")
+check("storage: native NVMe multipath off only for PX Enterprise on NVMe-oF",
+      (ce["storage"]["kernel_args"], cs["storage"]["kernel_args"]) == (["nvme_core.multipath=N"], []))
+ent_iscsi = copy.deepcopy(ent); ent_iscsi["storage"]["portworx"]["san_type"] = "ISCSI"
+ci = cluster_model(ent_iscsi, EXAMPLE)["storage"]
+check("storage: PX Enterprise on iSCSI keeps native NVMe multipath", ci["kernel_args"] == [])
+check("storage: transport from san_type", (cs["storage"]["transport"], ci["transport"]) == ("nvme-tcp", "iscsi"))
+check("storage: iSCSI limits Portworx to the storage networks' portals",
+      [e["name"] for e in ci["portworx"]["env"]] == ["PURE_FLASHARRAY_SAN_TYPE", "PURE_ISCSI_ALLOWED_CIDRS"]
+      and ci["portworx"]["env"][1]["value"] == ",".join(n["cidr"] for n in ent_iscsi["storage"]["networks"]))
+check("storage: NVMe/TCP env is the SAN type only",
+      cs["storage"]["portworx"]["env"] == [{"name": "PURE_FLASHARRAY_SAN_TYPE", "value": "NVMEOF-TCP"}])
+
+# --- addons -------------------------------------------------------------------------------------------------------
+ad = copy.deepcopy(base)
+ad["addons"] = [{"name": "cnv", "package": "kubevirt-hyperconverged", "channel": "stable", "csv": "kubevirt-hyperconverged-operator.v4.22.0",
+                 "namespace": "openshift-cnv",
+                 "instance": {"apiVersion": "hco.kubevirt.io/v1beta1", "kind": "HyperConverged",
+                              "metadata": {"name": "kubevirt-hyperconverged", "namespace": "openshift-cnv"}}}]
+ca = cluster_model(ad, EXAMPLE)["addons"][0]
+check("addons: defaults (redhat-operators, own namespace, wait for Available)",
+      (ca["source"], ca["all_namespaces"], ca["wait"]) == ("redhat-operators", False, {"type": "Available", "status": "True"}))
+check("addons: none by default", cluster_model(base, EXAMPLE)["addons"] == [])
+bad = copy.deepcopy(ad); del bad["addons"][0]["csv"]
+rejects("addons: csv is required (pinned)", bad, "missing 'csv'")
+bad = copy.deepcopy(ad); bad["addons"].append(copy.deepcopy(ad["addons"][0]))
+rejects("addons: duplicate name", bad, "defined twice")
+bad = copy.deepcopy(ad); del bad["addons"][0]["instance"]["kind"]
+rejects("addons: instance needs kind", bad, "instance needs 'kind'")
+check("addons: no dependent install plans by default", ca["approve_installplans"] == [])
+bad = copy.deepcopy(ad); bad["addons"][0]["approve_installplans"] = [{"namespace": "multicluster-engine"}]
+rejects("addons: dependent install plans need a pinned csv", bad, "need namespace and csv")
+
+# --- migration ----------------------------------------------------------------------------------------------------
+check("migration: off by default", cluster_model(base, EXAMPLE)["migration"]["enabled"] is False)
+mg = copy.deepcopy(ent_iscsi)
+mg["migration"] = {
+    "enabled": True,
+    "source": {"name": "vc1", "server": "vc1.example.com", "datacenter": "dc1", "clone_hosts": ["esx1.example.com"]},
+    "copy_offload": {"host_access": {"hosts": ["esx1"], "host_groups": ["esx-hg"]},
+                     "datastores": [{"name": "mtv-ds01", "size": "1T", "host_group": "esx-hg",
+                                     "vsphere_cluster": "c1", "format_host": "esx1.example.com"}]},
+    "plans": [{"name": "p1", "vms": ["vm1"]}]}
+cm = cluster_model(mg, EXAMPLE)["migration"]
+check("migration: derived user/role, hook on in enterprise mode, plan defaults",
+      (cm["source"]["user"].startswith("mtv-"), cm["source"]["role"].startswith("MTV-"),
+       cm["copy_offload"]["portworx_hook"], cm["plans"][0]["type"], cm["plans"][0]["target_namespace"])
+      == (True, True, True, "cold", "default"))
+bad = copy.deepcopy(mg); bad["storage"]["portworx"]["san_type"] = "NVMEOF-TCP"
+rejects("migration: copy offload needs a SCSI transport", bad, "needs a SCSI transport")
+bad = copy.deepcopy(mg); bad["migration"]["copy_offload"]["host_access"]["host_groups"] = []
+rejects("migration: datastore host group needs realm access", bad, "needs realm access")
+bad = copy.deepcopy(mg); bad["migration"]["plans"][0]["type"] = "warm"
+rejects("migration: copy offload is cold only", bad, "migrates cold only")
+bad = copy.deepcopy(mg); bad["migration"]["source"]["clone_hosts"] = []
+rejects("migration: copy offload needs clone hosts", bad, "needs migration.source.clone_hosts")
+mgc = copy.deepcopy(mg); mgc["storage"]["portworx"]["mode"] = "csi"
+check("migration: no Portworx hook in PX-CSI mode",
+      cluster_model(mgc, EXAMPLE)["migration"]["copy_offload"]["portworx_hook"] is False)
+
+# --- dns forward zones --------------------------------------------------------------------------------------------
+fw = copy.deepcopy(base)
+fw.setdefault("infra", {}).setdefault("dns", {})["forward_zones"] = [
+    {"zone": "Lab.Example.", "servers": ["192.0.2.53"], "probe": "vcenter.lab.example"}]
+cf = cluster_model(fw, EXAMPLE)["infra"]["dns"]["forward_zones"]
+check("dns forward zones: normalized (lower case, no trailing dot)",
+      cf == [{"zone": "lab.example", "servers": ["192.0.2.53"], "probe": "vcenter.lab.example"}])
+check("dns forward zones: none by default", cluster_model(base, EXAMPLE)["infra"]["dns"]["forward_zones"] == [])
+bad = copy.deepcopy(fw); bad["infra"]["dns"]["forward_zones"][0]["servers"] = ["dns.example"]
+rejects("dns forward zones: servers are IP addresses", bad, "is not an IP address")
+bad = copy.deepcopy(fw); bad["infra"]["dns"]["forward_zones"][0]["probe"] = "vcenter.other.example"
+rejects("dns forward zones: probe inside the zone", bad, "probe must be a name in the zone")
+bad = copy.deepcopy(fw); bad["infra"]["dns"]["forward_zones"].append(copy.deepcopy(fw["infra"]["dns"]["forward_zones"][0]))
+rejects("dns forward zones: zone listed twice", bad, "listed twice")
 
 # --- haproxy_pools ------------------------------------------------------------------------------------------------
 csv = "\n".join([

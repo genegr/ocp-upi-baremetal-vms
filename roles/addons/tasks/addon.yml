@@ -1,0 +1,65 @@
+---
+- name: "{{ addon.name }}: operator"
+  ansible.builtin.include_role:
+    name: olm_operator
+  vars:
+    olm_namespace: "{{ addon.namespace }}"
+    olm_package: "{{ addon.package }}"
+    olm_channel: "{{ addon.channel }}"
+    olm_csv: "{{ addon.csv }}"
+    olm_source: "{{ addon.source }}"
+    olm_target_namespaces: "{{ [] if addon.all_namespaces else [addon.namespace] }}"
+
+- name: "{{ addon.name }}: instance"
+  when: addon.instance is defined
+  block:
+    - name: "{{ addon.name }}: {{ addon.instance.kind }} {{ addon.instance.metadata.name }}"
+      kubernetes.core.k8s:
+        definition: "{{ addon.instance }}"
+      when: not ansible_check_mode or olm_csv_ready
+
+    # Operators the instance installs itself inherit the parent's Manual approval (ACM's MultiClusterHub creates the
+    # multicluster-engine Subscription): approve exactly the pinned CSV of each, nothing newer.
+    - name: "{{ addon.name }}: install plans of the operators its instance installs"
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        namespace: "{{ item.namespace }}"
+      register: dep_plans
+      until: dep_plans.resources | selectattr('spec.clusterServiceVersionNames', 'contains', item.csv) | list | length > 0
+      retries: 60
+      delay: 10
+      loop: "{{ addon.approve_installplans }}"
+      loop_control:
+        label: "{{ item.namespace }}/{{ item.csv }}"
+      when: not ansible_check_mode
+
+    - name: "{{ addon.name }}: approve those install plans only"
+      kubernetes.core.k8s:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        name: "{{ item.1.metadata.name }}"
+        namespace: "{{ item.0.item.namespace }}"
+        state: patched
+        definition:
+          spec:
+            approved: true
+      loop: "{{ dep_plans.results | default([]) | selectattr('resources', 'defined') | subelements('resources') }}"
+      loop_control:
+        label: "{{ item.0.item.namespace }}/{{ item.1.metadata.name }}"
+      when: item.0.item.csv in item.1.spec.clusterServiceVersionNames and not item.1.spec.approved
+    - name: "{{ addon.name }}: {{ addon.instance.kind }} ready"
+      kubernetes.core.k8s_info:
+        api_version: "{{ addon.instance.apiVersion }}"
+        kind: "{{ addon.instance.kind }}"
+        name: "{{ addon.instance.metadata.name }}"
+        namespace: "{{ addon.instance.metadata.namespace | default(omit) }}"
+      register: instance
+      until: >-
+        instance.resources | length == 1
+        and ((instance.resources[0].status.phase | default('')) == addon.wait.phase
+             if addon.wait.phase is defined
+             else instance.resources[0] | k8s_condition(addon.wait.type) == addon.wait.status)
+      retries: "{{ addon.wait.retries | default(90) }}"
+      delay: 20
+      when: not ansible_check_mode

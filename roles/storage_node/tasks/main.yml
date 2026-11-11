@@ -1,49 +1,110 @@
 ---
-# Node prerequisites for PX-CSI on FlashArray, as one MachineConfig per pool that runs workloads (storage.mc_roles):
-# /etc/multipath.conf + udev rules (vendor settings), iscsid/multipathd enabled, nvme_tcp loaded at boot, and a unique
-# NVMe host NQN per node. RHCOS's native NVMe multipath stays on (PX-CSI supports it). The MCO applies it with a
-# rolling reboot, one node at a time.
-- name: Pure storage MachineConfig per pool
+# Node prerequisites for Portworx on FlashArray, as one MachineConfig per pool that runs workloads (storage.mc_roles)
+# and per transport (c.storage.transport), named 99-<role>-pure-<transport>:
+#   every transport  /etc/multipath.conf + udev rules (vendor settings), multipathd enabled
+#   nvme-tcp/-rdma   nvme_tcp / nvme_rdma loaded at boot, a unique NVMe host NQN per node (RHCOS ships one for all);
+#                    Portworx Enterprise also needs native NVMe multipath off (c.storage.kernel_args)
+#   iscsi            iscsid enabled (RHCOS generates a unique initiator name at first boot)
+# Another transport's MachineConfig (or the older 99-<role>-pure-storage) is removed in the same run, so a transport
+# switch is one render and one rolling reboot, one node at a time.
+# The rendered config each pool targets before the change: a changed MachineConfig counts as rolled out only once the
+# controller has rendered a new one and the pool has reached it.
+- name: Pools before the change
+  kubernetes.core.k8s_info:
+    api_version: machineconfiguration.openshift.io/v1
+    kind: MachineConfigPool
+    name: "{{ item }}"
+  register: mcp_before
+  loop: "{{ c.storage.mc_roles }}"
+
+- name: Pure storage MachineConfig per pool ({{ c.storage.transport }})
   kubernetes.core.k8s:
     definition:
       apiVersion: machineconfiguration.openshift.io/v1
       kind: MachineConfig
       metadata:
-        name: "99-{{ item }}-pure-storage"
+        name: "99-{{ item }}-pure-{{ c.storage.transport }}"
         labels:
           machineconfiguration.openshift.io/role: "{{ item }}"
           app.kubernetes.io/managed-by: ocp-upi
       spec:
+        kernelArguments: "{{ c.storage.kernel_args }}"
         config:
           ignition:
             version: 3.2.0
           storage:
-            files:
-              - path: /etc/multipath.conf
-                mode: 420
-                overwrite: true
-                contents:
-                  source: "data:text/plain;charset=utf-8;base64,{{ lookup('ansible.builtin.file', 'multipath.conf') | b64encode }}"
-              - path: /etc/udev/rules.d/99-pure-storage.rules
-                mode: 420
-                overwrite: true
-                contents:
-                  source: "data:text/plain;charset=utf-8;base64,{{ lookup('ansible.builtin.file', '99-pure-storage.rules') | b64encode }}"
-              - path: /etc/modules-load.d/nvme_tcp.conf
-                mode: 420
-                overwrite: true
-                contents:
-                  source: "data:text/plain;charset=utf-8;base64,{{ 'nvme_tcp\n' | b64encode }}"
+            files: "{{ storage_mc_files + (storage_mc_nvme_files if nvme else []) }}"
           systemd:
-            units:
-              - name: nvme-unique-hostnqn.service
-                enabled: true
-                contents: "{{ lookup('ansible.builtin.file', 'nvme-unique-hostnqn.service') }}"
-              - name: iscsid.service
-                enabled: true
-              - name: multipathd.service
-                enabled: true
+            units: "{{ storage_mc_units + (storage_mc_nvme_units if nvme else storage_mc_iscsi_units if iscsi else []) }}"
   loop: "{{ c.storage.mc_roles }}"
+  register: storage_mc
+  vars:
+    nvme: "{{ c.storage.transport.startswith('nvme') }}"
+    iscsi: "{{ c.storage.transport == 'iscsi' }}"
+    nvme_module: "{{ 'nvme_rdma' if c.storage.transport == 'nvme-rdma' else 'nvme_tcp' }}"
+    storage_mc_files:
+      - path: /etc/multipath.conf
+        mode: 420
+        overwrite: true
+        contents:
+          source: "data:text/plain;charset=utf-8;base64,{{ lookup('ansible.builtin.file', 'multipath.conf') | b64encode }}"
+      - path: /etc/udev/rules.d/99-pure-storage.rules
+        mode: 420
+        overwrite: true
+        contents:
+          source: "data:text/plain;charset=utf-8;base64,{{ lookup('ansible.builtin.file', '99-pure-storage.rules') | b64encode }}"
+    storage_mc_nvme_files:
+      - path: "/etc/modules-load.d/{{ nvme_module }}.conf"
+        mode: 420
+        overwrite: true
+        contents:
+          source: "data:text/plain;charset=utf-8;base64,{{ (nvme_module ~ '\n') | b64encode }}"
+    storage_mc_units:
+      - name: multipathd.service
+        enabled: true
+    storage_mc_nvme_units:
+      - name: nvme-unique-hostnqn.service
+        enabled: true
+        contents: "{{ lookup('ansible.builtin.file', 'nvme-unique-hostnqn.service') }}"
+    storage_mc_iscsi_units:
+      - name: iscsid.service
+        enabled: true
+
+- name: Pure storage MachineConfigs of other transports
+  kubernetes.core.k8s_info:
+    api_version: machineconfiguration.openshift.io/v1
+    kind: MachineConfig
+    label_selectors: [app.kubernetes.io/managed-by=ocp-upi]
+  register: storage_mc_all
+
+- name: Remove the other transports' MachineConfigs
+  kubernetes.core.k8s:
+    api_version: machineconfiguration.openshift.io/v1
+    kind: MachineConfig
+    name: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ storage_mc_all.resources | map(attribute='metadata.name')
+       | select('match', '^99-(' ~ (c.storage.mc_roles | join('|')) ~ ')-pure-')
+       | reject('in', c.storage.mc_roles | map('regex_replace', '^(.*)$', '99-\1-pure-' ~ c.storage.transport))
+       | list }}
+  register: storage_mc_removed
+
+# A change that renders to the same config (no effective difference) never produces a new render: bounded wait.
+- name: Controller rendered the changed MachineConfig
+  kubernetes.core.k8s_info:
+    api_version: machineconfiguration.openshift.io/v1
+    kind: MachineConfigPool
+    name: "{{ item.0 }}"
+  register: mcp_render
+  until: (mcp_render.resources[0].spec.configuration.name | default('')) != (item.1.resources[0].spec.configuration.name | default(''))
+  retries: 12
+  delay: 10
+  failed_when: false
+  loop: "{{ c.storage.mc_roles | zip(mcp_before.results, storage_mc.results) }}"
+  loop_control:
+    label: "{{ item.0 }}"
+  when: (item.2.changed or storage_mc_removed.changed) and not ansible_check_mode
 
 - name: Pools rolled out (the MCO reboots one node at a time)
   kubernetes.core.k8s_info:
@@ -53,7 +114,8 @@
   register: mcp
   until: >-
     mcp.resources | length == 1
-    and ('99-' ~ item ~ '-pure-storage') in (mcp.resources[0].status.configuration.source | default([]) | map(attribute='name'))
+    and ('99-' ~ item ~ '-pure-' ~ c.storage.transport) in (mcp.resources[0].spec.configuration.source | default([]) | map(attribute='name'))
+    and mcp.resources[0].status.configuration.name | default('') == mcp.resources[0].spec.configuration.name | default('-')
     and mcp.resources[0] | k8s_condition('Updated') == 'True'
     and mcp.resources[0].status.updatedMachineCount | default(0) == mcp.resources[0].status.machineCount | default(-1)
   retries: 180
@@ -61,7 +123,7 @@
   loop: "{{ c.storage.mc_roles }}"
   when: not ansible_check_mode
 
-# Verify on the nodes themselves: one short-lived Pod per node reads the host's NQN and service state.
+# Verify on the nodes themselves: one short-lived Pod per node reads the host's NQN/IQN and service state.
 - name: Node check
   ansible.builtin.include_tasks: verify.yml
   when: not ansible_check_mode

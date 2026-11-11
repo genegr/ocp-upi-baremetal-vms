@@ -1,6 +1,6 @@
 ---
 # PX-CSI health: storage network policies, StorageCluster, CSI driver per node, StorageClass; realm usage on the array
-# (only when vault_flasharray_api_token is available).
+# (only when the array's admin token is in the vault).
 - name: Storage objects
   kubernetes.core.k8s_info:
     api_version: "{{ item.api }}"
@@ -43,12 +43,12 @@
 - name: Realm on the array
   everpure.flasharray.purefa_info:
     fa_url: "{{ c.storage.flasharray.endpoint }}"
-    api_token: "{{ vault_flasharray_api_token }}"
+    api_token: "{{ fa_admin_token }}"
     gather_subset: [realms]
   register: fa_realms
   failed_when: false
   no_log: true
-  when: vault_flasharray_api_token is defined
+  when: fa_admin_token | default('') | length > 0
 
 - name: Record the realm
   ansible.builtin.set_fact:

@@ -1,0 +1,18 @@
+---
+- name: "{{ vol }} connected to {{ ds.host_group }}?"
+  ansible.builtin.set_fact:
+    ds_connected: "{{ vol in (fa_hg_info.purefa_info.hgroups[ds.host_group].vols | default([]) | map(attribute='name') | list) }}"
+  vars:
+    vol: "{{ fa.realm }}::{{ fa.pod }}::{{ ds.name }}"
+
+- name: "Volume {{ fa.realm }}::{{ fa.pod }}::{{ ds.name }} ({{ ds.size }}, thin)"
+  everpure.flasharray.purefa_volume:
+    name: "{{ fa.realm }}::{{ fa.pod }}::{{ ds.name }}"
+    size: "{{ ds.size }}"
+  when: not ds_connected
+
+- name: "Connected to host group {{ ds.host_group }}"
+  everpure.flasharray.purefa_hg:
+    name: "{{ ds.host_group }}"
+    volume: ["{{ fa.realm }}::{{ fa.pod }}::{{ ds.name }}"]
+  when: not ds_connected

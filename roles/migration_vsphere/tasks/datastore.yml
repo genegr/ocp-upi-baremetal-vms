@@ -1,0 +1,81 @@
+---
+# One VMFS 6 datastore on a realm-pod volume: rescan its cluster, format it on format_host (a host that sees the LUN),
+# rescan again so the cluster's other hosts mount it. A host that still doesn't see the LUN is reported, not fatal
+# (FC zoning or path state on that host); the clone hosts must be among those that mount it.
+- name: "{{ ds.name }}: datastore present?"
+  community.vmware.vmware_datastore_info:
+    hostname: "{{ src.server }}"
+    username: "{{ vc_admin_user }}"
+    password: "{{ vc_admin_password }}"
+    validate_certs: "{{ not src.insecure }}"
+    datacenter: "{{ src.datacenter }}"
+    name: "{{ ds.name }}"
+  register: ds_info
+
+- name: "{{ ds.name }}: create"
+  when: ds_info.datastores | length == 0
+  block:
+    - name: "{{ ds.name }}: volume serial (the LUN is naa.624a9370 + serial)"
+      purefa_volume_info:
+        fa_url: "{{ fa.endpoint }}"
+        api_token: "{{ fa_admin_token }}"
+        names: ["{{ vol }}"]
+      register: ds_vol
+      failed_when: not ansible_check_mode and not ds_vol.volumes[vol].exists
+
+    - name: "{{ ds.name }}: rescan {{ ds.vsphere_cluster }}"
+      community.vmware.vmware_host_scanhba:
+        hostname: "{{ src.server }}"
+        username: "{{ vc_admin_user }}"
+        password: "{{ vc_admin_password }}"
+        validate_certs: "{{ not src.insecure }}"
+        cluster_name: "{{ ds.vsphere_cluster }}"
+        refresh_storage: true
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: "{{ ds.name }}: format VMFS 6 on {{ ds.format_host }}"
+      community.vmware.vmware_host_datastore:
+        hostname: "{{ src.server }}"
+        username: "{{ vc_admin_user }}"
+        password: "{{ vc_admin_password }}"
+        validate_certs: "{{ not src.insecure }}"
+        esxi_hostname: "{{ ds.format_host }}"
+        datastore_name: "{{ ds.name }}"
+        datastore_type: vmfs
+        vmfs_device_name: "naa.624a9370{{ ds_vol.volumes[vol].serial }}"
+        vmfs_version: 6
+        state: present
+      when: not ansible_check_mode
+
+    - name: "{{ ds.name }}: rescan so the other hosts mount it"
+      community.vmware.vmware_host_scanhba:
+        hostname: "{{ src.server }}"
+        username: "{{ vc_admin_user }}"
+        password: "{{ vc_admin_password }}"
+        validate_certs: "{{ not src.insecure }}"
+        cluster_name: "{{ ds.vsphere_cluster }}"
+        refresh_storage: true
+      changed_when: false
+      when: not ansible_check_mode
+  vars:
+    vol: "{{ fa.realm }}::{{ fa.pod }}::{{ ds.name }}"
+
+- name: "{{ ds.name }}: mounted by"
+  community.vmware.vmware_datastore_info:
+    hostname: "{{ src.server }}"
+    username: "{{ vc_admin_user }}"
+    password: "{{ vc_admin_password }}"
+    validate_certs: "{{ not src.insecure }}"
+    datacenter: "{{ src.datacenter }}"
+    name: "{{ ds.name }}"
+    schema: vsphere
+    properties: [name, host]
+  register: ds_mounted
+  when: not ansible_check_mode
+
+- name: "{{ ds.name }}: mounted"
+  ansible.builtin.debug:
+    msg: "{{ ds.name }} mounted by {{ ds_mounted.datastores[0].host | default([]) | length }} host(s)"
+  when: not ansible_check_mode
+  failed_when: ds_mounted.datastores | length != 1

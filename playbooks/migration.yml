@@ -1,0 +1,71 @@
+---
+# VM migration from vSphere with the Migration Toolkit for Virtualization (MTV, an addon), opt-in via `migration:`.
+# Phases (tags), in order; each is idempotent, run --check first:
+#   array    FlashArray: realm access for the ESXi hosts and host groups (purefa_resource_access), datastore volumes
+#            in the realm pod connected to their host group (XCOPY needs source and target in the same realm + pod)
+#   vsphere  vCenter: MTV role + SSO user + permission on the datacenter, VMFS datastores on those volumes
+#   mtv      MTV: provider (no VDDK, ESXi clone method SSH), FlashArray secret, MTV's SSH key on the clone hosts
+#            (through vCenter), storage map with FlashArray XCOPY, network map, Portworx hook, plans (not started)
+#   ansible-playbook playbooks/migration.yml -e cluster=<name> [--tags array|vsphere|mtv] [--check]
+# A migration is started by hand: the console (Migration > Plans) or a Migration CR for the plan.
+- name: Cluster model
+  hosts: localhost
+  gather_facts: false
+  tags: always
+  roles:
+    - cluster_model
+  tasks:
+    - name: Migration is configured for this cluster
+      ansible.builtin.assert:
+        that: c.migration.enabled
+        fail_msg: "{{ cluster }} has no migration section (migration.enabled)"
+        quiet: true
+
+    - name: vCenter administrator from the vault (migration.source.admin_*_var)
+      ansible.builtin.set_fact:
+        vc_admin_user: "{{ lookup('ansible.builtin.vars', c.migration.source.admin_user_var) }}"
+        vc_admin_password: "{{ lookup('ansible.builtin.vars', c.migration.source.admin_password_var) }}"
+      no_log: true
+
+- name: Migration
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+    group/everpure.flasharray.everpure.flasharray:
+      fa_url: "{{ c.storage.flasharray.endpoint }}"
+      api_token: "{{ fa_admin_token }}"
+  vars:
+    m: "{{ c.migration }}"
+    src: "{{ c.migration.source }}"
+    co: "{{ c.migration.copy_offload }}"
+    fa: "{{ c.storage.flasharray }}"
+    mtv_vc_password_file: "{{ cdir }}/vc-{{ c.migration.source.user }}.password"
+    govc_env:
+      GOVC_URL: "https://{{ c.migration.source.server }}/sdk"
+      GOVC_USERNAME: "{{ vc_admin_user }}"
+      GOVC_PASSWORD: "{{ vc_admin_password }}"
+      GOVC_INSECURE: "{{ c.migration.source.insecure | string | lower }}"
+  tasks:
+    - name: FlashArray (realm access, datastore volumes)
+      ansible.builtin.include_role:
+        name: migration_array
+        apply:
+          tags: array
+      tags: array
+      when: co.enabled
+
+    - name: vCenter (MTV account, VMFS datastores)
+      ansible.builtin.include_role:
+        name: migration_vsphere
+        apply:
+          tags: vsphere
+      tags: vsphere
+
+    - name: MTV (provider, maps, hook, plans)
+      ansible.builtin.include_role:
+        name: migration_mtv
+        apply:
+          tags: mtv
+      tags: mtv

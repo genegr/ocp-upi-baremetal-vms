@@ -1,0 +1,64 @@
+---
+# MTV's public key for root on each clone host, as the authorized_keys line MTV itself prints (SSHNotReady suggestion:
+# forced command to /vmfs/volumes/<ds>/secure-vmkfstools-wrapper, no forwarding). Added through vCenter, only where
+# the key is missing; then proven: with MTV's private key the forced command answers only SSH_OK.
+- name: MTV's public key
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ m.namespace }}"
+    name: "offload-ssh-keys-{{ src.name }}-public"
+  register: mtv_pub
+  until: mtv_pub.resources | length == 1
+  retries: 12
+  delay: 10
+
+- name: Root keys on the clone hosts
+  ansible.builtin.command:
+    argv: [govc, host.esxcli, -host, "{{ item }}", system, ssh, key, list]
+  environment: "{{ govc_env }}"
+  loop: "{{ src.clone_hosts }}"
+  register: esxi_keys
+  changed_when: false
+
+- name: Hosts without MTV's key
+  ansible.builtin.set_fact:
+    mtv_key_missing: "{{ esxi_keys.results | rejectattr('stdout', 'search', pub_key_body | regex_escape) | map(attribute='item') | list }}"
+  vars:
+    pub_key_body: "{{ (mtv_pub.resources[0].data.values() | first | b64decode | trim).split(' ')[1] }}"
+
+- name: The authorized_keys line MTV asks for
+  ansible.builtin.set_fact:
+    mtv_key_line: >-
+      {{ (provider.resources[0].status.conditions | selectattr('type', 'eq', 'SSHNotReady') | first).suggestion
+         | regex_findall('(?m)^command=.*$') | first }}
+  when: mtv_key_missing | length > 0
+
+- name: Add MTV's key for root
+  ansible.builtin.command:
+    argv: [govc, host.esxcli, -host, "{{ item }}", system, ssh, key, add, -username, root, -auth-key, "{{ mtv_key_line }}"]
+  environment: "{{ govc_env }}"
+  loop: "{{ mtv_key_missing }}"
+
+- name: MTV's private key (temporary, inside the toolbox)
+  ansible.builtin.copy:
+    content: "{{ lookup('kubernetes.core.k8s', kind='Secret', namespace=m.namespace, resource_name='offload-ssh-keys-' ~ src.name ~ '-private', kubeconfig=kubeconfig).data.values() | first | b64decode }}"
+    dest: /tmp/mtv-offload-key
+    mode: "0600"
+  changed_when: false
+  no_log: true
+
+- name: Forced command answers SSH_OK (the key can only run the wrapper)
+  ansible.builtin.command:
+    argv: [ssh, -i, /tmp/mtv-offload-key, -o, BatchMode=yes, -o, StrictHostKeyChecking=no, -o, UserKnownHostsFile=/dev/null,
+           -o, LogLevel=ERROR, -o, ConnectTimeout=10, "root@{{ item }}", "true"]
+  loop: "{{ src.clone_hosts }}"
+  register: ssh_test
+  changed_when: false
+  failed_when: ssh_test.stdout | trim != 'SSH_OK'
+
+- name: Remove the temporary key
+  ansible.builtin.file:
+    path: /tmp/mtv-offload-key
+    state: absent
+  changed_when: false

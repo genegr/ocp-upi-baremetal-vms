@@ -1,0 +1,89 @@
+---
+# Remove a cluster's FlashArray objects (irreversible): hosts (their volume connections first), realms with their
+# pods and volumes (eradicated), the realm user and its management-access policy, and the stored user token.
+# Defaults: this cluster's own realm, policy and user, plus every host inside those realms. A different or older
+# layout is passed explicitly, e.g. -e '{"cleanup_realms": ["old-realm"], "cleanup_hosts": ["worker0-old"]}'.
+# Objects that don't exist are skipped; other realms and hosts are never touched.
+- name: FlashArray cleanup
+  module_defaults:
+    group/everpure.flasharray.everpure.flasharray:
+      fa_url: "{{ fa.endpoint }}"
+      api_token: "{{ fa_admin_token }}"
+  block:
+    - name: Hosts and realms on the array
+      everpure.flasharray.purefa_info:
+        gather_subset: [hosts, realms]
+      register: fa_before
+      no_log: true
+
+    - name: What will be removed
+      ansible.builtin.set_fact:
+        cleanup_plan:
+          realms: "{{ cleanup_realms | default([fa.realm]) | select('in', fa_before.purefa_info.realms | default({})) | list }}"
+          hosts: >-
+            {{ ((cleanup_hosts | default([]))
+                + (fa_before.purefa_info.hosts | default({}) | dict2items | map(attribute='key')
+                   | select('match', '^(' ~ (cleanup_realms | default([fa.realm]) | map('regex_escape') | join('|')) ~ ')::')
+                   | list))
+               | unique | select('in', fa_before.purefa_info.hosts | default({})) | list }}
+          users: "{{ cleanup_users | default([fa.user]) }}"
+          policies: "{{ cleanup_policies | default([fa.policy]) }}"
+
+    - name: Plan
+      ansible.builtin.debug:
+        var: cleanup_plan
+
+    - name: Hosts (volume connections are removed first)
+      everpure.flasharray.purefa_host:
+        name: "{{ item }}"
+        state: absent
+      loop: "{{ cleanup_plan.hosts }}"
+
+    - name: Realms, with their pods and volumes, eradicated
+      everpure.flasharray.purefa_realm:
+        name: "{{ item }}"
+        state: absent
+        delete_contents: true
+        eradicate: true
+      loop: "{{ cleanup_plan.realms }}"
+
+    - name: Realm users
+      purefa_realm_admin:
+        fa_url: "{{ fa.endpoint }}"
+        api_token: "{{ fa_admin_token }}"
+        validate_certs: "{{ fa.validate_certs }}"
+        name: "{{ item }}"
+        policies: []
+        state: absent
+      loop: "{{ cleanup_plan.users }}"
+      no_log: true
+
+    - name: Management-access policies
+      everpure.flasharray.purefa_policy_management_access:
+        name: "{{ item }}"
+        state: absent
+      loop: "{{ cleanup_plan.policies }}"
+
+    - name: Stored realm user tokens
+      ansible.builtin.file:
+        path: "{{ cdir }}/flasharray-{{ item }}.token"
+        state: absent
+      loop: "{{ cleanup_plan.users }}"
+
+    - name: Array after the cleanup
+      everpure.flasharray.purefa_info:
+        gather_subset: [hosts, realms]
+      register: fa_after
+      no_log: true
+      when: not ansible_check_mode
+
+    - name: Nothing listed is left
+      ansible.builtin.assert:
+        that:
+          - cleanup_plan.realms | select('in', fa_after.purefa_info.realms | default({})) | list | length == 0
+          - cleanup_plan.hosts | select('in', fa_after.purefa_info.hosts | default({})) | list | length == 0
+        fail_msg: >-
+          still on the array: realms {{ cleanup_plan.realms | select('in', fa_after.purefa_info.realms | default({})) | list }},
+          hosts {{ cleanup_plan.hosts | select('in', fa_after.purefa_info.hosts | default({})) | list }}
+        success_msg: "removed realms {{ cleanup_plan.realms }} and hosts {{ cleanup_plan.hosts }}"
+      when: not ansible_check_mode

@@ -10,7 +10,7 @@
     - name: Realm pod before the test
       everpure.flasharray.purefa_info:
         fa_url: "{{ fa.endpoint }}"
-        api_token: "{{ vault_flasharray_api_token }}"
+        api_token: "{{ fa_admin_token }}"
         gather_subset: [pods]
       register: fa_before
       no_log: true
@@ -95,7 +95,7 @@
     - name: Realm pod with the volume
       everpure.flasharray.purefa_info:
         fa_url: "{{ fa.endpoint }}"
-        api_token: "{{ vault_flasharray_api_token }}"
+        api_token: "{{ fa_admin_token }}"
         gather_subset: [pods]
       register: fa_after
       no_log: true

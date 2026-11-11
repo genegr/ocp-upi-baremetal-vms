@@ -11,8 +11,14 @@ Run from the toolbox on the jump box (see the `ocp-upi-deploy` skill for the pre
 ansible-playbook playbooks/infra.yml -e cluster=<name> --check --diff   # ALWAYS first; show the user the diff
 ansible-playbook playbooks/infra.yml -e cluster=<name>                  # deploy; verified, rolled back on failure
 ansible-playbook playbooks/infra.yml -e cluster=<name> --tags dns|lb
+ansible-playbook playbooks/infra.yml -e cluster=<name> --tags dns_forward   # only infra.dns.forward_zones blocks
 ansible-playbook playbooks/infra.yml -e cluster=<name> -e infra_state=absent
 ```
+
+`infra.dns.forward_zones` (`[{zone, servers, probe}]`) forwards other zones, for example a source vCenter's for MTV, to
+their own DNS servers. In shared mode each zone is one marked Corefile block, verified through its `probe` name
+(rolled back if it doesn't resolve) and never removed on destroy, because other clusters may use it. A shared CoreDNS
+change still needs `--check --diff` and the user's go-ahead.
 
 The toolbox reaches `infra.user@infra.host` with the project key `.state/ssh/id_ed25519` (authorized once on that
 host). That user must be able to run `docker`.
