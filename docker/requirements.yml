@@ -15,6 +15,10 @@ collections:
     version: 3.4.0
   - name: ansible.posix
     version: 2.2.2
+  - name: ansible.windows       # WinRM connection, Windows facts (infra.dns.mode: ad)
+    version: 3.8.0
+  - name: community.windows     # win_dns_zone, win_dns_record (infra.dns.mode: ad)
+    version: 3.3.0
   - name: everpure.flasharray   # FlashArray realm, pod, policy (purestorage.flasharray now redirects here)
     version: 1.45.1
   - name: everpure.flashblade   # FlashBlade S3 account, user, key, bucket (Portworx Backup target)
