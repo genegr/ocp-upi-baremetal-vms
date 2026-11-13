@@ -109,3 +109,20 @@
     groups: [infra_hosts]
   when: c.infra.enabled
   changed_when: false
+
+# infra.dns.mode ad: the domain controller, reached over WinRM (vault_ad_user / vault_ad_password). The infra role
+# delegates the zone and record tasks to it.
+- name: Register the AD DNS server (WinRM)
+  ansible.builtin.add_host:
+    name: ad_dns
+    ansible_host: "{{ c.infra.dns.ad.server }}"
+    ansible_connection: winrm
+    ansible_port: "{{ c.infra.dns.ad.port }}"
+    ansible_winrm_scheme: "{{ 'https' if c.infra.dns.ad.port == 5986 else 'http' }}"
+    ansible_winrm_transport: "{{ c.infra.dns.ad.transport }}"
+    ansible_winrm_server_cert_validation: ignore
+    ansible_user: "{{ vault_ad_user | default('') }}"
+    ansible_password: "{{ vault_ad_password | default('') }}"
+  when: c.infra.enabled and c.infra.dns.mode == 'ad'
+  changed_when: false
+  no_log: true

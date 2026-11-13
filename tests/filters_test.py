@@ -216,6 +216,35 @@ rejects("dns forward zones: probe inside the zone", bad, "probe must be a name i
 bad = copy.deepcopy(fw); bad["infra"]["dns"]["forward_zones"].append(copy.deepcopy(fw["infra"]["dns"]["forward_zones"][0]))
 rejects("dns forward zones: zone listed twice", bad, "listed twice")
 
+# --- dns mode ad ------------------------------------------------------------------------------------------------
+adc = copy.deepcopy(base)
+adc.setdefault("infra", {}).setdefault("dns", {})["mode"] = "ad"
+ca = cluster_model(adc, EXAMPLE)
+check("dns ad: server defaults to the first dns_server, http port 5985, no PTRs",
+      ca["infra"]["dns"]["ad"]["server"] == "192.0.2.2" and ca["infra"]["dns"]["ad"]["port"] == 5985
+      and ca["dns_ptr_records"] == [])
+check("dns ad: same forward records as the CoreDNS modes", ca["dns_records"] == cluster_model(base, EXAMPLE)["dns_records"])
+rev = copy.deepcopy(adc); rev["infra"]["dns"]["ad"] = {"reverse_zone": "2.0.192.in-addr.arpa."}
+cr = cluster_model(rev, EXAMPLE)
+check("dns ad: PTRs for every node inside the reverse zone",
+      {"name": "51", "target": "master0." + cr["cluster"]["domain"]} in cr["dns_ptr_records"]
+      and len(cr["dns_ptr_records"]) == len(cr["nodes"]))
+rev16 = copy.deepcopy(adc); rev16["infra"]["dns"]["ad"] = {"reverse_zone": "0.192.in-addr.arpa"}
+check("dns ad: PTR names are relative to a shorter reverse zone",
+      cluster_model(rev16, EXAMPLE)["dns_ptr_records"][1]["name"] == "51.2")
+other = copy.deepcopy(adc); other["infra"]["dns"]["ad"] = {"reverse_zone": "51.100.198.in-addr.arpa"}
+check("dns ad: no PTRs for nodes outside the reverse zone", cluster_model(other, EXAMPLE)["dns_ptr_records"] == [])
+bad = copy.deepcopy(adc); bad["infra"]["dns"]["ad"] = {"server": "198.51.100.10"}
+rejects("dns ad: server is one of the nodes' DNS servers", bad, "must be one of network.dns_servers")
+bad = copy.deepcopy(adc); bad["infra"]["dns"]["ad"] = {"port": 443}
+rejects("dns ad: WinRM port", bad, "5985 (http) or 5986")
+bad = copy.deepcopy(adc); bad["infra"]["dns"]["ad"] = {"reverse_zone": "example.com"}
+rejects("dns ad: reverse zone is in-addr.arpa", bad, "IPv4 reverse zone")
+bad = copy.deepcopy(fw); bad["infra"]["dns"]["mode"] = "ad"
+rejects("dns ad: no CoreDNS forward zones", bad, "conditional forwarders")
+bad = copy.deepcopy(base); bad.setdefault("infra", {}).setdefault("dns", {})["mode"] = "bind"
+rejects("dns: unknown mode", bad, "'managed', 'shared' or 'ad'")
+
 # --- haproxy_pools ------------------------------------------------------------------------------------------------
 csv = "\n".join([
     "# pxname,svname," + ",".join(f"f{i}" for i in range(2, 18)) + ",status",

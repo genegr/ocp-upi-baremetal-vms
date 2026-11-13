@@ -30,6 +30,11 @@
   when: c.infra.dns.mode == 'managed'
   tags: [dns]
 
+- name: DNS (zone in Active Directory DNS, over WinRM)
+  ansible.builtin.import_tasks: dns-ad.yml
+  when: c.infra.dns.mode == 'ad'
+  tags: [dns]
+
 - name: HAProxy
   ansible.builtin.import_tasks: haproxy.yml
   tags: [lb]

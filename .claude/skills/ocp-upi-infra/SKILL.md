@@ -30,6 +30,11 @@ Rendered from the cluster model. Never hand-edit the generated files on the host
 - **`shared` DNS**: adds `db.<zone>` to `infra.dns.shared.config_dir` and a Corefile block between
   `# BEGIN/END ocp-upi <zone>` markers. Optionally comments out the cluster's old records in `legacy_zone_file`.
   Restarts `infra.dns.shared.container` (`docker_container restart`) only when something changed.
+- **`ad` DNS**: an AD-integrated primary zone `<cluster>.<base_domain>` (replication `infra.dns.ad.replication`,
+  dynamic updates off) on the DC `infra.dns.ad.server` (host `ad_dns`, WinRM, `vault_ad_user`/`vault_ad_password`),
+  with every `c.dns_records` A record and, if `infra.dns.ad.reverse_zone` is set (it must exist), the nodes' PTRs.
+  Nothing else on the DC is touched; `infra_state=absent` removes the PTRs and the zone. A node dropped from the config
+  keeps its record until then. In `--check` on a new zone, the records are skipped (the zone task shows it).
 - **HAProxy**: compose project `<cluster>-haproxy` in `<infra.base_dir>/<cluster>/haproxy/`, publishing 6443, 22623,
   80→8080, 443→4443 and stats on both VIPs. The config is validated with `haproxy -c` before it's written.
   `infra.haproxy.replace_compose_dir` stops a hand-made HAProxy once, and brings it back if the new one fails.
@@ -37,7 +42,7 @@ Rendered from the cluster model. Never hand-edit the generated files on the host
   `infra.dns.verify_names`), `wait_for` on every VIP port, and the stats page.
 
 ## Rules
-- **Shared CoreDNS = other people's DNS.** A real run restarts it (≈1 s blip for every zone) and may edit their
+- **Shared CoreDNS and AD DNS = other people's DNS.** (AD: no restart, but a zone change replicates to every DC.) A real run restarts it (≈1 s blip for every zone) and may edit their
   parent zone file. Show the `--check --diff` output and get the user's explicit go-ahead in this conversation first.
   The same goes for a HAProxy cutover.
 - Before a shared-mode change, record `lookup('community.general.dig', ...)` answers for a few other zones and

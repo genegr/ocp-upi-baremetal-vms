@@ -64,6 +64,16 @@ DEFAULTS = {
                 "container": "coredns",
                 "legacy_zone_file": "",
             },
+            # mode ad: the cluster zone as an AD-integrated primary zone on an Active Directory DNS server, managed
+            # over WinRM (credentials: vault_ad_user / vault_ad_password). No DNS container on the infra host.
+            "ad": {
+                "server": "",            # the domain controller (IP or name); default: network.dns_servers[0]
+                "port": 5985,            # 5985 http (NTLM message encryption) | 5986 https
+                "transport": "ntlm",
+                "replication": "domain",  # AD replication scope of the zone: domain | forest | legacy
+                "reverse_zone": "",      # optional existing reverse zone, e.g. 2.0.192.in-addr.arpa: PTRs for nodes
+                "ttl": 300,
+            },
         },
         "extra_records": [],
         "haproxy": {
@@ -370,8 +380,24 @@ def cluster_model(raw, config_path):
     }
 
     dns = c["infra"]["dns"]
-    if dns["mode"] not in ("managed", "shared"):
-        _die("infra.dns.mode must be 'managed' or 'shared'")
+    if dns["mode"] not in ("managed", "shared", "ad"):
+        _die("infra.dns.mode must be 'managed', 'shared' or 'ad'")
+    if dns["mode"] == "ad":
+        ad = dns["ad"]
+        if not ad["server"]:
+            ad["server"] = str(net["dns_servers"][0])
+        if str(ad["server"]) not in [str(s) for s in net["dns_servers"]]:
+            _die("infra.dns.ad.server must be one of network.dns_servers (the nodes resolve the cluster zone there)")
+        if int(ad["port"]) not in (5985, 5986):
+            _die("infra.dns.ad.port must be 5985 (http) or 5986 (https)")
+        ad["port"] = int(ad["port"])
+        if ad["replication"] not in ("domain", "forest", "legacy"):
+            _die("infra.dns.ad.replication must be domain, forest or legacy")
+        ad["reverse_zone"] = str(ad["reverse_zone"]).rstrip(".").lower()
+        if ad["reverse_zone"] and not ad["reverse_zone"].endswith(".in-addr.arpa"):
+            _die("infra.dns.ad.reverse_zone must be an IPv4 reverse zone (*.in-addr.arpa)")
+        if dns["forward_zones"]:
+            _die("infra.dns.forward_zones is for the CoreDNS modes; in ad mode add conditional forwarders on the DC")
     if dns["mode"] == "shared" and not dns["shared"]["config_dir"]:
         _die("infra.dns.shared.config_dir is required in shared mode")
     if dns["mode"] == "managed" and not dns["listen"]:
@@ -407,6 +433,19 @@ def cluster_model(raw, config_path):
         {"name": "*.apps", "ip": net["ingress_vip"]},
     ] + [{"name": n["name"], "ip": n["ip"]} for n in nodes] + list(c["infra"]["extra_records"])
     c["dns_records"] = records
+
+    # ad mode, optional: PTRs for the nodes whose address falls inside the configured reverse zone.
+    c["dns_ptr_records"] = []
+    rz = c["infra"]["dns"]["ad"]["reverse_zone"] if c["infra"]["dns"]["mode"] == "ad" else ""
+    if rz:
+        zone_octets = list(reversed(rz[: -len(".in-addr.arpa")].split(".")))
+        for n in nodes:
+            octets = str(n["ip"]).split(".")
+            if octets[: len(zone_octets)] == zone_octets:
+                c["dns_ptr_records"].append({
+                    "name": ".".join(reversed(octets[len(zone_octets):])),
+                    "target": f"{n['name']}.{c['cluster']['domain']}",
+                })
 
     # Resolve the HTPasswd user list: relative paths are relative to the config file's directory.
     htp = c["identity"]["htpasswd"]

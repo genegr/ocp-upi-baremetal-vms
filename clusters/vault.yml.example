@@ -6,6 +6,9 @@ vault_vsphere_user: "administrator@vsphere.local"
 vault_vsphere_password: "CHANGE_ME"
 # Red Hat pull secret (https://console.redhat.com/openshift/install/pull-secret), the JSON as one string
 vault_pull_secret: '{"auths": {"cloud.openshift.com": {"auth": "CHANGE_ME", "email": "you@example.com"}}}'
+# Only for infra.dns.mode ad: a Windows account allowed to manage DNS zones on the DC (DnsAdmins), used over WinRM
+# vault_ad_user: "EXAMPLE\\dnsadmin"
+# vault_ad_password: "CHANGE_ME"
 # Optional, for playbooks/storage.yml: API token of a FlashArray array admin. Used only to create the cluster's realm,
 # pod, policy and realm user; Portworx gets the realm user's own token.
 # vault_flasharray_api_token: "CHANGE_ME"

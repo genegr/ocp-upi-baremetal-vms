@@ -21,6 +21,11 @@
   loop: "{{ c.infra.dns.listen }}"
   when: infra_state == 'present' and c.infra.dns.mode == 'managed'
 
+- name: AD DNS server answers over WinRM (vault_ad_user / vault_ad_password)
+  ansible.windows.win_ping:
+  delegate_to: ad_dns
+  when: c.infra.dns.mode == 'ad'
+
 - name: Shared CoreDNS Corefile exists
   ansible.builtin.stat:
     path: "{{ c.infra.dns.shared.config_dir | regex_replace('^~', ansible_facts.env.HOME) }}/Corefile"

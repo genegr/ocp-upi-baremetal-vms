@@ -83,6 +83,9 @@ release, OpenTofu state, install dir, ISOs.
 - `managed`: a dedicated CoreDNS container for the cluster zone.
 - `shared`: add the cluster zone to an existing CoreDNS. It writes the zone file and a marked Corefile block, and
   restarts that container only when something changed.
+- `ad`: an AD-integrated primary zone on an Active Directory DNS server, managed over WinRM
+  (`community.windows.win_dns_zone`/`win_dns_record`) with `vault_ad_user`/`vault_ad_password`. Optional PTRs in an
+  existing reverse zone. HAProxy still runs on the infra host. The DC serves everyone: `--check --diff` first.
 
 ## Deploy
 
@@ -95,7 +98,7 @@ Phases, as tags. Every phase is idempotent, so re-running one is the normal way 
 | Tag | Does |
 |-----|------|
 | `tools` | pins the release, fetches openshift-install/oc and the RHCOS ISO, creates the SSH key |
-| `infra` | DNS zone + HAProxy on the Docker host (shared CoreDNS: run `playbooks/infra.yml --check --diff` first) |
+| `infra` | DNS zone + HAProxy on the Docker host (shared CoreDNS or AD: run `playbooks/infra.yml --check --diff` first) |
 | `preflight` | DNS answers, LB ports, node IPs free, platform objects, secrets |
 | `ignition` | install-config + manifests + ignition (bootstrap certs valid 24 h; `-e ignition_force=true` starts over) |
 | `isos` | one ISO per node (rebuilt only when its inputs change) |

@@ -1,0 +1,91 @@
+---
+# infra.dns.mode ad: the cluster zone as an AD-integrated primary zone on an Active Directory DNS server, over WinRM
+# (host ad_dns, registered by cluster_model). The DC serves the whole environment: run infra.yml --check --diff and
+# get the go-ahead first. Only the cluster's own zone (and its PTRs, if infra.dns.ad.reverse_zone is set) is touched.
+# A record of a node removed from the config stays in the zone until the zone is recreated (infra_state=absent).
+- name: Cluster zone and records in AD DNS
+  when: infra_state == 'present'
+  block:
+    # Read-only: an SOA owned by the zone name itself means the DC already serves the zone. Needed because
+    # win_dns_zone (community.windows 3.3.0) fails in check mode on a zone that does not exist yet ("Failed to lookup
+    # new zone").
+    - name: Does the DC already serve {{ zone }}
+      ansible.builtin.set_fact:
+        ad_zone_exists: >-
+          {{ lookup('community.general.dig', zone ~ '.', 'qtype=SOA', '@' ~ c.infra.dns.ad.server, fail_on_error=false)
+             not in ['NXDOMAIN', 'NoAnswer', '', 'None'] }}
+
+    - name: Zone {{ zone }} would be created (check mode)
+      ansible.builtin.debug:
+        msg: "would create AD-integrated primary zone {{ zone }} (replication {{ c.infra.dns.ad.replication }})"
+      when: ansible_check_mode and not ad_zone_exists
+      changed_when: true
+
+    - name: Zone {{ zone }} (AD-integrated primary, replication {{ c.infra.dns.ad.replication }})
+      when: not ansible_check_mode or ad_zone_exists
+      community.windows.win_dns_zone:
+        name: "{{ zone }}"
+        type: primary
+        replication: "{{ c.infra.dns.ad.replication }}"
+        dynamic_update: none
+        state: present
+      delegate_to: ad_dns
+      register: ad_zone
+
+    # In check mode a zone that does not exist yet cannot be queried for records: they are listed instead.
+    - name: A records that would be created (check mode, new zone)
+      ansible.builtin.debug:
+        msg: "{{ c.dns_records | map(attribute='name') | zip(c.dns_records | map(attribute='ip')) | map('join', ' A ') }}"
+      when: ansible_check_mode and not ad_zone_exists
+      changed_when: true
+
+    - name: A records
+      community.windows.win_dns_record:
+        zone: "{{ zone }}"
+        name: "{{ item.name }}"
+        type: A
+        value: ["{{ item.ip }}"]
+        ttl: "{{ c.infra.dns.ad.ttl }}"
+        state: present
+      delegate_to: ad_dns
+      loop: "{{ c.dns_records }}"
+      loop_control:
+        label: "{{ item.name }}.{{ zone }} -> {{ item.ip }}"
+      when: not ansible_check_mode or ad_zone_exists
+
+    - name: PTR records in {{ c.infra.dns.ad.reverse_zone | default('-', true) }}
+      community.windows.win_dns_record:
+        zone: "{{ c.infra.dns.ad.reverse_zone }}"
+        name: "{{ item.name }}"
+        type: PTR
+        value: ["{{ item.target }}"]
+        ttl: "{{ c.infra.dns.ad.ttl }}"
+        state: present
+      delegate_to: ad_dns
+      loop: "{{ c.dns_ptr_records }}"
+      loop_control:
+        label: "{{ item.name }}.{{ c.infra.dns.ad.reverse_zone }} -> {{ item.target }}"
+
+    - name: Verify DNS
+      ansible.builtin.include_tasks: dns-verify.yml
+      when: not ansible_check_mode
+
+- name: Remove the cluster zone from AD DNS
+  when: infra_state == 'absent'
+  block:
+    - name: PTR records
+      community.windows.win_dns_record:
+        zone: "{{ c.infra.dns.ad.reverse_zone }}"
+        name: "{{ item.name }}"
+        type: PTR
+        state: absent
+      delegate_to: ad_dns
+      loop: "{{ c.dns_ptr_records }}"
+      loop_control:
+        label: "{{ item.name }}.{{ c.infra.dns.ad.reverse_zone }}"
+
+    - name: Zone {{ zone }} (with all its records)
+      community.windows.win_dns_zone:
+        name: "{{ zone }}"
+        state: absent
+      delegate_to: ad_dns

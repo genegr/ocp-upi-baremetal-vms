@@ -47,7 +47,7 @@ drives every phase, from a pinned toolbox container on a Docker jump box. Human 
   explicitly: a phase run against the wrong cluster is the most damaging mistake possible here.
 - The cluster model `c` (from the `cluster_model` role/filter) is the single source of truth. Derived values (FQDNs,
   MACs, LB backends, DNS records) are computed in the filter only. OpenTofu reads `.state/clusters/<name>/cluster.json`.
-- Shared CoreDNS (`infra.dns.mode: shared`) serves other environments: run `playbooks/infra.yml --check --diff` and get
+- Shared CoreDNS (`infra.dns.mode: shared`) and Active Directory DNS (`ad`, over WinRM) serve other environments: run `playbooks/infra.yml --check --diff` and get
   the user's explicit go-ahead before a real run. `destroy.yml` also needs explicit consent every time.
 - Long runs (a full deploy, rolling updates, `storage.yml --tags nics|node`) go in the background with output to
   `.state/<name>.log`. Then `grep -E "fatal|PLAY RECAP" -A8` the log.
