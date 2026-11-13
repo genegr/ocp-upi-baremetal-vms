@@ -54,3 +54,8 @@ with `playbooks/addons.yml`.
   the node journal (`journalctl -t portworx`). "failed to execute nvme cmd" with a portal-less target means the array
   also serves NVMe-FC: switch `san_type` to `ISCSI` (see CLAUDE.md).
 - Never use the array-admin token in the cluster, and never reuse another cluster's realm or user.
+- Array mode (`storage.flasharray.realm: false`): array-level pod `<cluster>-px-csi` and hosts, user in the built-in
+  `storage_admin` policy. Needed when an array-wide consumer (OpenStack Cinder's Pure driver) shares the nodes'
+  initiators: "Unable to connect or find connection to host" after "Re-using existing purity host '<realm>::…'" is
+  the realm conflict. Switching a cluster = teardown of the realm (all its PVs) and a fresh `flasharray`/`portworx`.
+  No migration copy offload in array mode.

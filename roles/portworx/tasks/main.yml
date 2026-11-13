@@ -34,10 +34,11 @@
         namespace: "{{ px.namespace }}"
       type: Opaque
       stringData:
+        # No Realm in array mode: PX-CSI then creates array-level node hosts.
         pure.json: >-
           {{ {'FlashArrays': [{'MgmtEndPoint': fa.endpoint,
-                               'APIToken': lookup('ansible.builtin.file', cdir ~ '/flasharray-' ~ fa.user ~ '.token'),
-                               'Realm': fa.realm}]} | to_json }}
+                               'APIToken': lookup('ansible.builtin.file', cdir ~ '/flasharray-' ~ fa.user ~ '.token')}
+                              | combine({'Realm': fa.realm} if fa.use_realm else {})]} | to_json }}
   no_log: true
   when: realm_token.stat.exists and (not ansible_check_mode or olm_csv_ready)
 

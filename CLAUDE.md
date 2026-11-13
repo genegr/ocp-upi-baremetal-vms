@@ -141,6 +141,13 @@ clusters/                      <name>.yaml, <name>.htpasswd.yml, vault.yml (giti
 - **`purefa_user` (1.45.1) returns a new API token as a plain string in `user_info`**, not `user_info.user_api` as
   documented; given a `password` for an existing user without `old_password` it exits without doing anything. A token
   is shown only at creation: keep it in the same task run.
+- **A realm host can't take a non-realm volume**: PX-CSI (realm user, `Realm` in `pure.json`) creates the node hosts
+  inside the realm (`<realm>::<node>-<uuid>`), and a node has one IQN/NQN. An array-wide consumer of the same
+  initiators then fails: OpenStack Cinder's Pure driver (no realm support in 19.0) logs "Re-using existing purity host
+  '<realm>::master1-…'" and "Unable to connect or find connection to host" (found 2026-11-13 with RHOSO Glance on
+  Cinder on a compact cluster). Fix: array mode, `storage.flasharray.realm: false` (array-level pod and hosts, user in
+  the built-in `storage_admin` policy). Switching an existing cluster means `storage.yml --tags teardown` of the realm
+  and new PVs. Array-mode teardown removes only the pod's connections and leaves shared hosts.
 - **MTV copy offload (XCOPY) on FlashArray**: SCSI only (iSCSI/FC, no NVMe datastores), source datastore + FADA
   volumes + Portworx cloud drives on the same array, realm and pod. A realm volume connects to an array-level host
   group only when the **group itself** has realm access ("Connection outside of the realm without resource access is

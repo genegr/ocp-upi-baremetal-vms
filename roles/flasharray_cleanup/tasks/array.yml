@@ -1,0 +1,109 @@
+---
+# Array mode (storage.flasharray.realm: false): remove the cluster's array-level pod with its volumes, the PX user and
+# its token. The node hosts are array-level and may be shared (e.g. OpenStack Cinder connects its own volumes to the
+# same initiators): only the pod's volume connections are removed, and a host is deleted only when it belongs to a
+# node of this cluster (PX names it <node>-<uuid>) and nothing else is connected to it any more. The built-in policy
+# is never touched. Other hosts, pods and users are never touched.
+- name: FlashArray cleanup (array mode)
+  module_defaults:
+    group/everpure.flasharray.everpure.flasharray:
+      fa_url: "{{ fa.endpoint }}"
+      api_token: "{{ fa_admin_token }}"
+  block:
+    - name: Hosts and pods on the array
+      everpure.flasharray.purefa_info:
+        gather_subset: [hosts, pods]
+      register: fa_before
+      no_log: true
+
+    - name: What will be removed
+      ansible.builtin.set_fact:
+        cleanup_plan: >-
+          {%- set pods = cleanup_pods | default([fa.pod]) | select('in', fa_before.purefa_info.pods | default({})) | list -%}
+          {%- set prefixes = pods | map('regex_replace', '$', '::') | list -%}
+          {%- set node_re = '^(' ~ (c.nodes | map(attribute='name') | map('regex_escape') | join('|')) ~ ')-' -%}
+          {%- set disconnect = [] -%}
+          {%- set hosts = [] -%}
+          {%- set shared = [] -%}
+          {%- for name, h in (fa_before.purefa_info.hosts | default({})).items() -%}
+          {%-   set vols = h.volumes | default([]) | map(attribute='volume') | select | list -%}
+          {%-   set mine = vols | select('match', '^(' ~ (prefixes | map('regex_escape') | join('|') or '$^') ~ ')') | list -%}
+          {%-   for v in mine -%}{%- set _ = disconnect.append({'host': name, 'volume': v}) -%}{%- endfor -%}
+          {%-   if name is match(node_re) and '::' not in name -%}
+          {%-     if vols | reject('in', mine) | list | length == 0 -%}{%- set _ = hosts.append(name) -%}
+          {%-     else -%}{%- set _ = shared.append(name) -%}{%- endif -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ {'pods': pods, 'disconnect': disconnect, 'hosts': (cleanup_hosts | default([])) + hosts | unique,
+              'kept_shared_hosts': shared, 'users': cleanup_users | default([fa.user]),
+              'policies': cleanup_policies | default([])} }}
+
+    - name: Plan
+      ansible.builtin.debug:
+        var: cleanup_plan
+
+    - name: Disconnect the pod's volumes
+      everpure.flasharray.purefa_host:
+        name: "{{ item.host }}"
+        volume: "{{ item.volume }}"
+        state: absent
+      loop: "{{ cleanup_plan.disconnect }}"
+      loop_control:
+        label: "{{ item.host }} {{ item.volume }}"
+
+    - name: Node hosts with nothing else connected
+      everpure.flasharray.purefa_host:
+        name: "{{ item }}"
+        state: absent
+      loop: "{{ cleanup_plan.hosts }}"
+
+    - name: Pods, with their volumes, eradicated
+      everpure.flasharray.purefa_pod:
+        name: "{{ item }}"
+        state: absent
+        delete_contents: true
+        eradicate: true
+      loop: "{{ cleanup_plan.pods }}"
+
+    - name: Users
+      purefa_realm_admin:
+        fa_url: "{{ fa.endpoint }}"
+        api_token: "{{ fa_admin_token }}"
+        validate_certs: "{{ fa.validate_certs }}"
+        name: "{{ item }}"
+        policies: []
+        state: absent
+      loop: "{{ cleanup_plan.users }}"
+      no_log: true
+
+    - name: Management-access policies (only those listed explicitly; never a built-in one)
+      everpure.flasharray.purefa_policy_management_access:
+        name: "{{ item }}"
+        state: absent
+      loop: "{{ cleanup_plan.policies | reject('equalto', 'storage_admin') | list }}"
+
+    - name: Stored user tokens
+      ansible.builtin.file:
+        path: "{{ cdir }}/flasharray-{{ item }}.token"
+        state: absent
+      loop: "{{ cleanup_plan.users }}"
+
+    - name: Array after the cleanup
+      everpure.flasharray.purefa_info:
+        gather_subset: [hosts, pods]
+      register: fa_after
+      no_log: true
+      when: not ansible_check_mode
+
+    - name: Nothing listed is left
+      ansible.builtin.assert:
+        that:
+          - cleanup_plan.pods | select('in', fa_after.purefa_info.pods | default({})) | list | length == 0
+          - cleanup_plan.hosts | select('in', fa_after.purefa_info.hosts | default({})) | list | length == 0
+        fail_msg: >-
+          still on the array: pods {{ cleanup_plan.pods | select('in', fa_after.purefa_info.pods | default({})) | list }},
+          hosts {{ cleanup_plan.hosts | select('in', fa_after.purefa_info.hosts | default({})) | list }}
+        success_msg: >-
+          removed pods {{ cleanup_plan.pods }} and hosts {{ cleanup_plan.hosts }};
+          kept shared hosts {{ cleanup_plan.kept_shared_hosts }}
+      when: not ansible_check_mode

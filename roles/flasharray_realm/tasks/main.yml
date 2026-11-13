@@ -2,6 +2,8 @@
 # Dedicated FlashArray realm for the cluster (secure multi-tenancy, as PX-CSI documents it):
 #   realm (+ quota) -> pod inside the realm -> management-access policy (role scoped to the realm) -> role-less user
 #   that is a member of that policy, with its own API token.
+# Array mode (storage.flasharray.realm: false): an array-level pod (+ quota) and a user in the built-in policy
+# (storage_admin); no realm, no custom policy. PX-CSI then creates array-level node hosts.
 # The array-admin token (storage.flasharray.token_var in the vault) is used only here. The realm user's token is written once to
 # .state/clusters/<name>/flasharray-<user>.token; -e flasharray_rotate_token=true replaces it.
 - name: FlashArray admin token is available
@@ -23,11 +25,13 @@
       everpure.flasharray.purefa_realm:
         name: "{{ fa.realm }}"
         quota: "{{ fa.quota if fa.quota | length > 0 else omit }}"
+      when: fa.use_realm
 
-    - name: Pod {{ fa.realm }}::{{ fa.pod }}
+    - name: Pod {{ fa.pod_path }}
       everpure.flasharray.purefa_pod:
         name: "{{ fa.pod }}"
-        realm: "{{ fa.realm }}"
+        realm: "{{ fa.realm if fa.use_realm else omit }}"
+        quota: "{{ fa.quota if not fa.use_realm and fa.quota | length > 0 else omit }}"
 
     - name: Policy {{ fa.policy }} ({{ fa.role }}, scoped to the realm)
       everpure.flasharray.purefa_policy_management_access:
@@ -37,13 +41,48 @@
           - role: "{{ fa.role }}"
             scope: "{{ fa.realm }}"
             resource_type: realms
+      when: fa.use_realm
 
     - name: Stored token for {{ fa.user }}
       ansible.builtin.stat:
         path: "{{ cdir }}/flasharray-{{ fa.user }}.token"
       register: stored_token
 
+    # Array mode: membership of a built-in policy makes the array report a role user (role = that policy), which
+    # purefa_realm_admin refuses to manage again. When it is already in that state and we hold its token, leave it.
+    - name: Array mode - existing user {{ fa.user }}
+      when: not fa.use_realm
+      block:
+        - name: Admin session
+          ansible.builtin.uri:
+            url: "https://{{ fa.endpoint }}/api/2.46/login"
+            method: POST
+            headers:
+              api-token: "{{ fa_admin_token }}"
+            validate_certs: "{{ fa.validate_certs }}"
+          register: fa_admin_session
+          no_log: true
+          check_mode: false
+
+        - name: User {{ fa.user }} on the array
+          ansible.builtin.uri:
+            url: "https://{{ fa.endpoint }}/api/2.46/admins?names={{ fa.user }}"
+            headers:
+              x-auth-token: "{{ fa_admin_session.x_auth_token }}"
+            validate_certs: "{{ fa.validate_certs }}"
+            status_code: [200, 400]
+          register: fa_user_now
+          check_mode: false
+
+    - name: User already in the wanted state (array mode)
+      ansible.builtin.set_fact:
+        fa_user_ok: >-
+          {{ not fa.use_realm and fa_user_now.status | default(0) == 200 and fa_user_now.json['items'] | default([]) | length == 1
+             and (fa_user_now.json['items'][0].role.name | default('')) == fa.policy
+             and stored_token.stat.exists and not (flasharray_rotate_token | default(false) | bool) }}
+
     - name: Realm user {{ fa.user }} (no global role, member of {{ fa.policy }})
+      when: not fa_user_ok
       purefa_realm_admin:
         fa_url: "{{ fa.endpoint }}"
         api_token: "{{ fa_admin_token }}"
@@ -66,5 +105,6 @@
     - name: Realm summary
       ansible.builtin.debug:
         msg: >-
-          realm {{ fa.realm }}{{ ' (quota ' ~ fa.quota ~ ')' if fa.quota else '' }}, pod {{ fa.realm }}::{{ fa.pod }},
-          policy {{ fa.policy }} ({{ fa.role }}), user {{ fa.user }}{{ ' (new token)' if realm_user.api_token | default('') else '' }}
+          {{ ('realm ' ~ fa.realm) if fa.use_realm else 'array mode (no realm)' }}{{ ' (quota ' ~ fa.quota ~ ')' if fa.quota else '' }},
+          pod {{ fa.pod_path }}, policy {{ fa.policy }}{{ (' (' ~ fa.role ~ ')') if fa.use_realm else ' (built-in)' }},
+          user {{ fa.user }}{{ ' (new token)' if realm_user.api_token | default('') else '' }}

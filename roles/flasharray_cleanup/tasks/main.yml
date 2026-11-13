@@ -4,7 +4,14 @@
 # Defaults: this cluster's own realm, policy and user, plus every host inside those realms. A different or older
 # layout is passed explicitly, e.g. -e '{"cleanup_realms": ["old-realm"], "cleanup_hosts": ["worker0-old"]}'.
 # Objects that don't exist are skipped; other realms and hosts are never touched.
+# Array mode (storage.flasharray.realm: false) is handled by array.yml; an older realm layout can still be removed
+# from an array-mode config by passing cleanup_realms explicitly.
+- name: FlashArray cleanup (array mode)
+  ansible.builtin.include_tasks: array.yml
+  when: not fa.use_realm
+
 - name: FlashArray cleanup
+  when: fa.use_realm or cleanup_realms is defined
   module_defaults:
     group/everpure.flasharray.everpure.flasharray:
       fa_url: "{{ fa.endpoint }}"
@@ -26,8 +33,8 @@
                    | select('match', '^(' ~ (cleanup_realms | default([fa.realm]) | map('regex_escape') | join('|')) ~ ')::')
                    | list))
                | unique | select('in', fa_before.purefa_info.hosts | default({})) | list }}
-          users: "{{ cleanup_users | default([fa.user]) }}"
-          policies: "{{ cleanup_policies | default([fa.policy]) }}"
+          users: "{{ cleanup_users | default([fa.user] if fa.use_realm else []) }}"
+          policies: "{{ cleanup_policies | default([fa.policy] if fa.use_realm else []) }}"
 
     - name: Plan
       ansible.builtin.debug:

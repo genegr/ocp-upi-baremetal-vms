@@ -100,19 +100,19 @@
       register: fa_after
       no_log: true
 
-    - name: The data was written and {{ fa.realm }}::{{ fa.pod }} grew by the PVC's size
+    - name: The data was written and {{ fa.pod_path }} grew by the PVC's size
       ansible.builtin.assert:
         that:
           - smoke_log.log_lines | first == 'px-smoke'
           - grown | int >= smoke_size_gib | int * 1073741824
         fail_msg: >-
-          log {{ smoke_log.log_lines }}; {{ fa.realm }}::{{ fa.pod }} provisioned {{ before | human_readable }}
+          log {{ smoke_log.log_lines }}; {{ fa.pod_path }} provisioned {{ before | human_readable }}
           before, {{ after | human_readable }} after (expected +{{ smoke_size_gib }} GiB)
         success_msg: >-
-          {{ pvc.resources[0].spec.volumeName }} in {{ fa.realm }}::{{ fa.pod }}
+          {{ pvc.resources[0].spec.volumeName }} in {{ fa.pod_path }}
           (+{{ grown | human_readable }}): {{ smoke_log.log_lines | select | last }}
       vars:
-        pod_name: "{{ fa.realm }}::{{ fa.pod }}"
+        pod_name: "{{ fa.pod_path }}"
         before: "{{ fa_before.purefa_info.pods[pod_name].total_provisioned | default(0) | int }}"
         after: "{{ fa_after.purefa_info.pods[pod_name].total_provisioned | default(0) | int }}"
         grown: "{{ after | int - before | int }}"

@@ -106,10 +106,12 @@ DEFAULTS = {
             "endpoint": "",
             "token_var": "vault_flasharray_api_token",  # vault variable with this array's admin API token
             "validate_certs": False,
-            "realm": "",          # default: the cluster name
-            "quota": "",          # e.g. 10T
-            "pod": "px-csi",
-            "policy": "",         # default: <realm>-storage
+            # default: the cluster name. false = array mode: no realm, an array-level pod, node hosts at array level
+            # (shareable with other array-wide consumers of the same nodes, e.g. OpenStack Cinder's Pure driver).
+            "realm": "",
+            "quota": "",          # e.g. 10T (realm quota; in array mode the pod's)
+            "pod": "px-csi",      # array mode: default <cluster>-px-csi (array-level pod names are array-wide)
+            "policy": "",         # default: <realm>-storage; array mode: the built-in storage_admin policy
             "role": "storage",    # role granted by the policy, scoped to the realm
             "user": "",           # default: <cluster>-px
         },
@@ -512,13 +514,28 @@ def _storage(c, nodes, net):
     st["nodes"] = [n["name"] for n in nodes if n["storage"]]
 
     fa = st["flasharray"]
-    fa["realm"] = fa["realm"] or c["cluster"]["name"]
-    fa["policy"] = fa["policy"] or f"{fa['realm']}-storage"
+    # Realm mode (default): realm -> pod -> policy scoped to the realm -> role-less user; PX-CSI creates the node hosts
+    # inside the realm. Array mode (realm: false): an array-level pod and a user in the built-in storage_admin policy;
+    # PX-CSI creates array-level hosts, which an array-wide consumer of the same initiators can connect to as well.
+    if fa["realm"] is not False and not isinstance(fa["realm"], str):
+        _die("storage.flasharray.realm must be a name, empty (the cluster name) or false (array mode, no realm)")
+    fa["use_realm"] = fa["realm"] is not False
+    if fa["use_realm"]:
+        fa["realm"] = fa["realm"] or c["cluster"]["name"]
+        fa["policy"] = fa["policy"] or f"{fa['realm']}-storage"
+        fa["pod_path"] = f"{fa['realm']}::{fa['pod']}"
+    else:
+        fa["realm"] = ""
+        if fa["pod"] == "px-csi":
+            fa["pod"] = f"{c['cluster']['name']}-px-csi"
+        fa["policy"] = fa["policy"] or "storage_admin"
+        fa["pod_path"] = fa["pod"]
     fa["user"] = fa["user"] or f"{c['cluster']['name']}-px"
     if not re.match(r"^vault_[a-z0-9_]+$", str(fa["token_var"])):
         _die("storage.flasharray.token_var must name a vault variable (vault_...)")
-    for key in ("realm", "pod", "policy", "user"):
-        if not re.match(r"^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$", str(fa[key])):
+    for key in (["realm"] if fa["use_realm"] else []) + ["pod", "policy", "user"]:
+        if not re.match(r"^[A-Za-z0-9]([-_A-Za-z0-9]*[A-Za-z0-9])?$" if key == "policy" else
+                        r"^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$", str(fa[key])):
             _die(f"storage.flasharray.{key} '{fa[key]}' must be letters, digits and '-'")
     px = st["portworx"]
     if px["enabled"]:
@@ -606,6 +623,9 @@ def _migration(c):
     if co["enabled"]:
         if not px["enabled"]:
             _die("migration.copy_offload needs storage.portworx.enabled (FADA target volumes in the realm pod)")
+        if not c["storage"]["flasharray"]["use_realm"]:
+            _die("migration.copy_offload needs a FlashArray realm (storage.flasharray.realm, not false): the clones "
+                 "and host access are realm-scoped")
         if px["san_type"] not in ("ISCSI", "FC"):
             _die("migration.copy_offload (XCOPY) needs a SCSI transport: storage.portworx.san_type ISCSI or FC")
         if not src["clone_hosts"]:

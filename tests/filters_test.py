@@ -98,6 +98,17 @@ check("storage: no addresses on the bootstrap", next(n for n in cs["nodes"] if n
 fa = cs["storage"]["flasharray"]
 check("storage: realm/policy/user defaults from the cluster name",
       (fa["realm"], fa["policy"], fa["user"]) == ("ocp4", "ocp4-storage", "ocp4-px"))
+check("storage: realm mode, pod path realm::pod", fa["use_realm"] and fa["pod_path"] == "ocp4::px-csi")
+arr = copy.deepcopy(st); arr["storage"]["flasharray"]["realm"] = False
+fa_arr = cluster_model(arr, EXAMPLE)["storage"]["flasharray"]
+check("storage: array mode (realm false): no realm, cluster pod, built-in storage_admin policy",
+      (fa_arr["use_realm"], fa_arr["realm"], fa_arr["pod"], fa_arr["pod_path"], fa_arr["policy"], fa_arr["user"])
+      == (False, "", "ocp4-px-csi", "ocp4-px-csi", "storage_admin", "ocp4-px"))
+arr2 = copy.deepcopy(arr); arr2["storage"]["flasharray"]["pod"] = "lab-pod"
+check("storage: array mode keeps an explicit pod name",
+      cluster_model(arr2, EXAMPLE)["storage"]["flasharray"]["pod_path"] == "lab-pod")
+bad = copy.deepcopy(st); bad["storage"]["flasharray"]["realm"] = True
+rejects("storage: realm is a name, empty or false", bad, "must be a name, empty")
 std = copy.deepcopy(st); std["nodes"] = base["nodes"]; std["roles"]["worker"]["extra_networks"] = ["Storage A", "Storage B"]
 csd = cluster_model(std, EXAMPLE)
 check("storage: standard topology puts storage IPs on workers only",
@@ -180,6 +191,8 @@ check("migration: derived user/role, hook on in enterprise mode, plan defaults",
       == (True, True, True, "cold", "default"))
 bad = copy.deepcopy(mg); bad["storage"]["portworx"]["san_type"] = "NVMEOF-TCP"
 rejects("migration: copy offload needs a SCSI transport", bad, "needs a SCSI transport")
+bad = copy.deepcopy(mg); bad["storage"]["flasharray"]["realm"] = False
+rejects("migration: copy offload needs a realm (not array mode)", bad, "needs a FlashArray realm")
 bad = copy.deepcopy(mg); bad["migration"]["copy_offload"]["host_access"]["host_groups"] = []
 rejects("migration: datastore host group needs realm access", bad, "needs realm access")
 bad = copy.deepcopy(mg); bad["migration"]["plans"][0]["type"] = "warm"

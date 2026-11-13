@@ -138,10 +138,13 @@ identity:
 #     endpoint: 192.0.2.40            # management address
 #     token_var: vault_flasharray_api_token   # vault variable with this array's admin API token
 #     validate_certs: false
-#     realm: ""                       # default: the cluster name
-#     quota: ""                       # e.g. 10T (empty = no realm quota)
-#     pod: px-csi                     # pod inside the realm that holds the volumes
-#     policy: ""                      # default: <realm>-storage (role below, scoped to the realm)
+#     realm: ""                       # default: the cluster name. false = array mode: no realm, an array-level pod,
+#                                     # array-level node hosts that another array-wide user of the same initiators
+#                                     # (e.g. OpenStack Cinder's Pure driver) can share. No migration copy offload then.
+#     quota: ""                       # e.g. 10T (empty = no realm quota; array mode: the pod's quota)
+#     pod: px-csi                     # pod inside the realm that holds the volumes (array mode: <cluster>-px-csi)
+#     policy: ""                      # default: <realm>-storage (role below, scoped to the realm); array mode:
+#                                     # the built-in storage_admin policy (array-wide)
 #     role: storage
 #     user: ""                        # default: <cluster name>-px (no global role; its token lands in .state/)
 #   portworx:

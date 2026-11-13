@@ -188,6 +188,13 @@ On a running cluster, `playbooks/rolling_update.yml` (or `storage.yml --tags nic
 whose only access is a `storage` policy scoped to that realm. The array-admin token creates these objects and is never
 given to the cluster.
 
+**Array mode** (`storage.flasharray.realm: false`): no realm. An array-level pod (`<cluster>-px-csi`, quota on the
+pod) and a user in the built-in `storage_admin` policy, so PX-CSI creates array-level node hosts. Use it when another
+array-wide consumer must connect volumes to the same node initiators: a realm host can't take a volume from outside
+its realm, and a node has only one IQN/NQN (e.g. OpenStack Cinder's Pure driver on a compact cluster that also runs
+the OpenStack control plane). Migration copy offload needs realm mode. Teardown in array mode removes only the pod's
+connections and keeps hosts that still carry other volumes.
+
 Configure the `storage` section (see `cluster.example.yaml`):
 - the data NICs: `roles.<role>.extra_networks`, on the nodes that run workloads (workers, or the masters of a compact
   cluster);
