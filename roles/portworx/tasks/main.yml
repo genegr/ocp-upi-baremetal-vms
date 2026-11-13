@@ -140,7 +140,28 @@
   ansible.builtin.include_tasks: enterprise.yml
   when: px.mode == 'enterprise'
 
+# StorageClass parameters are immutable ("updates to parameters are forbidden"): a changed pod (e.g. a switch to array
+# mode) replaces the class. Existing PVs don't depend on the StorageClass object.
+- name: StorageClass {{ px.storageclass.name }} (current)
+  kubernetes.core.k8s_info:
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    name: "{{ px.storageclass.name }}"
+  register: px_sc_now
+
+- name: Replace it when its parameters changed
+  kubernetes.core.k8s:
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    name: "{{ px.storageclass.name }}"
+    state: absent
+  register: px_sc_replace
+  when: >-
+    px_sc_now.resources | length > 0
+    and px_sc_now.resources[0].parameters | default({}) != {'backend': 'pure_block', 'pure_fa_pod_name': fa.pod}
+
 - name: StorageClass {{ px.storageclass.name }}
+  when: not (ansible_check_mode and px_sc_replace is changed)   # --check only simulated the delete
   kubernetes.core.k8s:
     definition:
       apiVersion: storage.k8s.io/v1

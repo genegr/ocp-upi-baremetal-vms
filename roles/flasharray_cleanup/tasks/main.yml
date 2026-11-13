@@ -46,13 +46,18 @@
         state: absent
       loop: "{{ cleanup_plan.hosts }}"
 
-    - name: Realms, with their pods and volumes, eradicated
+    # SafeMode: the array's automatic default protection puts a pgroup-auto with a ratcheted retention lock into the
+    # pod, so eradication is refused ("contains pgroups that are retention-locked"). The realm is then destroyed and
+    # the array eradicates it when its eradication delay ends: that counts as removed.
+    - name: Realms, with their pods and volumes, eradicated (destroyed only, under a SafeMode retention lock)
       everpure.flasharray.purefa_realm:
         name: "{{ item }}"
         state: absent
         delete_contents: true
         eradicate: true
       loop: "{{ cleanup_plan.realms }}"
+      register: fa_realm_rm
+      failed_when: fa_realm_rm is failed and fa_realm_rm.msg | default('') is not search('retention-locked')
 
     - name: Realm users
       purefa_realm_admin:
@@ -84,13 +89,20 @@
       no_log: true
       when: not ansible_check_mode
 
-    - name: Nothing listed is left
+    - name: Nothing listed is left (a destroyed realm waiting for its eradication delay counts as removed)
       ansible.builtin.assert:
         that:
-          - cleanup_plan.realms | select('in', fa_after.purefa_info.realms | default({})) | list | length == 0
+          - live_realms | length == 0
           - cleanup_plan.hosts | select('in', fa_after.purefa_info.hosts | default({})) | list | length == 0
         fail_msg: >-
-          still on the array: realms {{ cleanup_plan.realms | select('in', fa_after.purefa_info.realms | default({})) | list }},
+          still on the array: realms {{ live_realms }},
           hosts {{ cleanup_plan.hosts | select('in', fa_after.purefa_info.hosts | default({})) | list }}
-        success_msg: "removed realms {{ cleanup_plan.realms }} and hosts {{ cleanup_plan.hosts }}"
+        success_msg: >-
+          removed realms {{ cleanup_plan.realms }} and hosts {{ cleanup_plan.hosts }}{{ (' (destroyed, eradicated by the
+          array after its eradication delay: ' ~ (pending_realms | join(', ')) ~ ')') if pending_realms else '' }}
+      vars:
+        after_realms: "{{ fa_after.purefa_info.realms | default({}) }}"
+        live_realms: "{{ cleanup_plan.realms | select('in', after_realms) | reject('in', after_realms | dict2items
+                         | selectattr('value.destroyed') | map(attribute='key') | list) | list }}"
+        pending_realms: "{{ cleanup_plan.realms | select('in', after_realms) | reject('in', live_realms) | list }}"
       when: not ansible_check_mode
