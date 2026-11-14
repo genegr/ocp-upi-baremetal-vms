@@ -30,7 +30,7 @@ for the deployment is not that yes. Rows marked "if" run only when the config en
 | 5 | Storage (if `storage.portworx.enabled`) | `ocp-upi-storage`: `storage.yml --tags nics`, `network`, `node`, `flasharray`, `portworx`, `smoke` | 1 h (`node` reboots each node) | FlashArray |
 | 6 | Operators (if `addons:`) | `addons.yml` (each pinned CSV, Manual approval) | 10–20 min | — |
 | 7 | Backup (if `backup:`) | `backup.yml`; see CLAUDE.md "Portworx Backup" | 10 min | — |
-| 8 | Migration (if asked) | `ocp-upi-migration`: `migration.yml --tags array,vsphere,mtv` | 20 min | FlashArray, vCenter |
+| 8 | Migration (if asked) | `ocp-upi-migration`: `migration.yml --tags array,vsphere,mtv`; a demo run: `ocp-upi-migration-demo` (`--tags run -e plan_name=<plan>`) | 20 min (+5-15 per run) | FlashArray, vCenter; a reset deletes the migrated VM |
 
 The ignition from step 3 is valid for 24 h. Never resume a bootstrap from older ignition: the isos phase refuses
 it, and then ignition, isos and vms run again.

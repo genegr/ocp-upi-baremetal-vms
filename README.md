@@ -277,8 +277,9 @@ realm and pod. So the VMs to migrate go on a migration datastore whose volume li
 | `vsphere` | creates the MTV role (MTV's minimum privileges + copy offload), the SSO user `mtv-<cluster>@<sso_domain>` (random password in `.state/`), the permission on the datacenter, and the VMFS datastores |
 | `mtv` | provider (no VDDK; ESXi clone method SSH), FlashArray secret (realm user's token, `PURE_CLUSTER_PREFIX` = `<realm>::<pod>::px_<cluster UID[:8]>`), MTV's SSH key on the clone hosts (added through vCenter, restricted to Pure's `vmkfstools` wrapper, checked), storage map (FADA class, XCOPY, `dedicatedMigrationHosts`), network map, Portworx hook resources, plans |
 
-Plans are created and validated, not started: start one from the console (Migration > Plans) or with a `Migration`
-CR. Measured in the lab (30 GiB Ubuntu VM): about 1 min disk transfer, 4.5 min guest conversion, 3.5 min Portworx hook.
+Plans are created and validated, not started. Run one with `--tags run -e plan_name=<plan>` (it starts, watches and
+checks the migration and reports each step's time), and again for a demo with `-e reset=true -e confirm=<plan>`; the
+full walkthrough is [docs/migration-demo.md](docs/migration-demo.md). Measured in the lab (30 GiB Ubuntu VM): about 1 min disk transfer, 3 min guest conversion, 3 min Portworx hook (4.3 min in total without the hook, 6.9 min with it).
 Without the hook the VM stays on its FADA volumes: shorter, with array-native data services. Per plan with
 `plans[].portworx_hook: false`; `copy_offload.portworx_hook` is the default for every plan (and `false` there makes
 the hook unavailable).

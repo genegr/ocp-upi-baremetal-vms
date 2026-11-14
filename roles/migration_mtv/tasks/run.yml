@@ -1,0 +1,237 @@
+---
+# Run one plan from migration.plans (-e plan=<name>): optional reset of a previous run, the Plan (re)applied and Ready,
+# a Migration started, the pipeline watched to the end, the result checked and the step times reported.
+# Reset (-e reset=true -e confirm=<plan>): deletes, in the plan's target namespace, only the VMs named in the plan that
+# MTV created (labels `migration` + `vmID`; their disk PVCs go with them, owned by the VM), then the plan's Migrations
+# and the Plan itself, so the same plan runs again. A VM without MTV's labels is never touched.
+- name: Plan {{ run_plan_name }} is in migration.plans
+  ansible.builtin.assert:
+    that: run_plan | length == 1
+    fail_msg: "no plan '{{ run_plan_name }}' in migration.plans ({{ m.plans | map(attribute='name') | list }})"
+    quiet: true
+  vars:
+    run_plan: "{{ m.plans | selectattr('name', 'eq', run_plan_name) | list }}"
+
+- name: The plan
+  ansible.builtin.set_fact:
+    plan: "{{ m.plans | selectattr('name', 'eq', run_plan_name) | first }}"
+
+- name: Providers
+  kubernetes.core.k8s_info:
+    api_version: forklift.konveyor.io/v1beta1
+    kind: Provider
+    namespace: "{{ m.namespace }}"
+  register: run_providers
+
+- name: Destination provider name
+  ansible.builtin.set_fact:
+    host_provider: "{{ run_providers.resources | selectattr('spec.type', 'eq', 'openshift') | map(attribute='metadata.name') | first | default('host') }}"
+
+- name: Reset a previous run
+  when: reset | default(false) | bool
+  block:
+    - name: The reset is confirmed (-e confirm={{ plan.name }})
+      ansible.builtin.assert:
+        that: (confirm | default('')) == plan.name
+        fail_msg: "reset deletes the migrated VMs {{ plan.vms }} in {{ plan.target_namespace }}: add -e confirm={{ plan.name }}"
+        quiet: true
+
+    - name: Migrated VMs from a previous run
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ plan.target_namespace }}"
+        name: "{{ item }}"
+      loop: "{{ plan.vms }}"
+      register: old_vms
+
+    - name: Delete the VMs MTV created (their disk PVCs go with them)
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ plan.target_namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: true
+        wait_timeout: 300
+      loop: "{{ old_vms.results | map(attribute='resources') | flatten
+                | selectattr('metadata.labels.migration', 'defined') | selectattr('metadata.labels.vmID', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.metadata.name }} (from plan {{ item.metadata.labels['plan-name'] | default('?') }})"
+
+    - name: VMs with these names that MTV did not create are left alone
+      ansible.builtin.assert:
+        that: foreign | length == 0
+        fail_msg: "{{ foreign }} in {{ plan.target_namespace }} were not created by MTV: not deleted; rename or remove them by hand"
+        quiet: true
+      vars:
+        foreign: "{{ old_vms.results | map(attribute='resources') | flatten
+                     | rejectattr('metadata.labels.migration', 'defined') | map(attribute='metadata.name') | list }}"
+
+    # A finished conversion pod (virt-v2v, labels migration + vmID) still references the disk PVC, and
+    # kubernetes.io/pvc-protection keeps a PVC while any pod uses it, even a Completed one.
+    - name: MTV's finished pods of those VMs (conversion, populator)
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ plan.target_namespace }}"
+        label_selectors: ["vmID in ({{ vm_ids | join(',') }})", migration]
+        state: absent
+        delete_all: true
+        wait: true
+      when: vm_ids | length > 0
+      vars:
+        vm_ids: "{{ old_vms.results | map(attribute='resources') | flatten
+                    | selectattr('metadata.labels.vmID', 'defined') | map(attribute='metadata.labels.vmID') | unique | list }}"
+
+    - name: Disk PVCs of those VMs are gone
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: "{{ plan.target_namespace }}"
+        label_selectors: ["vmID in ({{ vm_ids | join(',') }})", migration]
+      register: old_pvcs
+      until: old_pvcs.resources | length == 0
+      retries: 30
+      delay: 10
+      when: vm_ids | length > 0
+      vars:
+        vm_ids: "{{ old_vms.results | map(attribute='resources') | flatten
+                    | selectattr('metadata.labels.vmID', 'defined') | map(attribute='metadata.labels.vmID') | unique | list }}"
+
+    - name: Migrations of the plan
+      kubernetes.core.k8s_info:
+        api_version: forklift.konveyor.io/v1beta1
+        kind: Migration
+        namespace: "{{ m.namespace }}"
+      register: old_migrations
+
+    - name: Delete the plan's Migrations
+      kubernetes.core.k8s:
+        api_version: forklift.konveyor.io/v1beta1
+        kind: Migration
+        namespace: "{{ m.namespace }}"
+        name: "{{ item.metadata.name }}"
+        state: absent
+      loop: "{{ old_migrations.resources | selectattr('spec.plan.name', 'eq', plan.name) | list }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    - name: Delete the Plan (re-created below)
+      kubernetes.core.k8s:
+        api_version: forklift.konveyor.io/v1beta1
+        kind: Plan
+        namespace: "{{ m.namespace }}"
+        name: "{{ plan.name }}"
+        state: absent
+        wait: true
+
+- name: Plan {{ plan.name }}
+  ansible.builtin.include_tasks: plan.yml
+
+- name: Plan {{ plan.name }} can start
+  ansible.builtin.assert:
+    that: plan_info.resources[0] | k8s_condition('Ready') == 'True'
+    fail_msg: >-
+      {{ plan.name }} is not ready ({{ plan_info.resources[0].status.conditions | default([])
+         | selectattr('category', 'in', ['Critical', 'Error']) | map(attribute='message') | list }}).
+      Already migrated? Rerun with -e reset=true -e confirm={{ plan.name }}
+    quiet: true
+
+- name: Start the migration
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: forklift.konveyor.io/v1beta1
+      kind: Migration
+      metadata:
+        generateName: "{{ plan.name }}-"
+        namespace: "{{ m.namespace }}"
+      spec:
+        plan: {name: "{{ plan.name }}", namespace: "{{ m.namespace }}", uid: "{{ plan_info.resources[0].metadata.uid }}"}
+  register: migration
+
+- name: Migration {{ migration.result.metadata.name }} finished (up to {{ run_timeout_minutes | default(60) }} min)
+  kubernetes.core.k8s_info:
+    api_version: forklift.konveyor.io/v1beta1
+    kind: Migration
+    namespace: "{{ m.namespace }}"
+    name: "{{ migration.result.metadata.name }}"
+  register: mig
+  until: >-
+    mig.resources[0] | k8s_condition('Succeeded') == 'True' or mig.resources[0] | k8s_condition('Failed') == 'True'
+  retries: "{{ ((run_timeout_minutes | default(60) | int) * 3) }}"
+  delay: 20
+
+- name: Plan status after the run
+  kubernetes.core.k8s_info:
+    api_version: forklift.konveyor.io/v1beta1
+    kind: Plan
+    namespace: "{{ m.namespace }}"
+    name: "{{ plan.name }}"
+  register: plan_done
+
+- name: Step times
+  ansible.builtin.set_fact:
+    run_steps: >-
+      {{ run_steps | default([]) + [vm.name ~ ' ' ~ step.name ~ ': '
+         ~ (((step.completed | to_datetime('%Y-%m-%dT%H:%M:%SZ')) - (step.started | to_datetime('%Y-%m-%dT%H:%M:%SZ'))).total_seconds() | int)
+         ~ ' s' ~ (' (' ~ step.error.reasons | join('; ') ~ ')' if step.error is defined else '')] }}
+  loop: "{{ plan_done.resources[0].status.migration.vms | default([]) | subelements('pipeline') }}"
+  loop_control:
+    label: "{{ item.0.name }} {{ item.1.name }}"
+  vars:
+    vm: "{{ item.0 }}"
+    step: "{{ item.1 }}"
+  when: item.1.started is defined and item.1.completed is defined
+
+- name: Migration result
+  ansible.builtin.assert:
+    that: mig.resources[0] | k8s_condition('Succeeded') == 'True'
+    fail_msg: "{{ plan.name }} FAILED: {{ run_steps | default([]) }}. Plan status: oc -n {{ m.namespace }} get plan {{ plan.name }} -o yaml"
+    success_msg: "{{ plan.name }} succeeded: {{ run_steps | default([]) }}"
+
+- name: Migrated VMs running
+  kubernetes.core.k8s_info:
+    api_version: kubevirt.io/v1
+    kind: VirtualMachineInstance
+    namespace: "{{ plan.target_namespace }}"
+    name: "{{ item }}"
+  loop: "{{ plan.vms }}"
+  register: run_vmis
+  until: run_vmis.resources | length == 1 and run_vmis.resources[0].status.phase | default('') == 'Running'
+  retries: 30
+  delay: 10
+
+# The disks as the VMs use them (the Portworx hook re-creates the PVCs, so read them from the VMs, not by label).
+- name: Disk PVCs of the migrated VMs
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: PersistentVolumeClaim
+    namespace: "{{ plan.target_namespace }}"
+    name: "{{ item }}"
+  loop: >-
+    {{ run_vmis.results | map(attribute='resources') | flatten | map(attribute='spec.volumes') | flatten
+       | selectattr('persistentVolumeClaim', 'defined') | map(attribute='persistentVolumeClaim.claimName') | list
+       + run_vmis.results | map(attribute='resources') | flatten | map(attribute='spec.volumes') | flatten
+       | selectattr('dataVolume', 'defined') | map(attribute='dataVolume.name') | list }}
+  register: run_pvcs
+
+- name: Result
+  ansible.builtin.assert:
+    that:
+      - disk_classes | unique == [expected]
+      - live | unique == ['True']
+    fail_msg: "disks {{ disks }} (expected {{ expected }}), live-migratable {{ live }}"
+    success_msg: >-
+      VMs {{ vms }}; disks {{ disks }}; live-migratable {{ live }}; steps {{ run_steps | default([]) }}
+  vars:
+    expected: "{{ co.pxd_storageclass if plan.portworx_hook else co.storageclass }}"
+    vmis: "{{ run_vmis.results | map(attribute='resources') | flatten }}"
+    pvcs: "{{ run_pvcs.results | map(attribute='resources') | flatten }}"
+    disk_classes: "{{ pvcs | map(attribute='spec.storageClassName') | list }}"
+    disks: "{{ pvcs | map(attribute='metadata.name') | zip(disk_classes) | map('join', ' on ') | list }}"
+    live: "{{ vmis | map(attribute='status.conditions') | map('selectattr', 'type', 'eq', 'LiveMigratable')
+              | map('map', attribute='status') | map('join', '') | list }}"
+    vms: "{{ vmis | map(attribute='metadata.name') | zip(vmis | map(attribute='status.nodeName'),
+              vmis | map(attribute='status.interfaces') | map('first') | map(attribute='ipAddress', default='?'))
+              | map('join', ' ') | list }}"

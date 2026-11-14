@@ -32,19 +32,29 @@
     namespace: "{{ m.namespace }}"
     name: "{{ plan.name }}"
   register: plan_info
-  # Ready, or already done: after a migration MTV flags the plan VMAlreadyExists (the target VMs exist) / Succeeded.
+  # Evaluated by MTV: Ready, or a run behind it (Succeeded / Failed), or a target VM that already exists
+  # (VMAlreadyExists / MacConflicts: an earlier migration). The last two need a reset before the next run.
   until: >-
     plan_info.resources | length == 1
-    and (plan_info.resources[0] | k8s_condition('Ready') == 'True'
-         or plan_info.resources[0] | k8s_condition('Succeeded') == 'True'
-         or plan_info.resources[0] | k8s_condition('VMAlreadyExists') == 'True')
+    and (plan_info.resources[0].status.conditions | default([]) | selectattr('status', 'eq', 'True')
+         | map(attribute='type') | select('in', ['Ready', 'Succeeded', 'Failed', 'VMAlreadyExists', 'MacConflicts'])
+         | list | length > 0)
   retries: 18
   delay: 10
   when: not ansible_check_mode
 
+# Only a configuration problem fails the setup: a Critical condition other than the existing target VM.
 - name: "Plan {{ plan.name }} state"
-  ansible.builtin.debug:
-    msg: >-
-      {{ plan.name }}: {{ 'ready to start' if plan_info.resources[0] | k8s_condition('Ready') == 'True'
-         else 'already migrated (its VMs exist in ' ~ plan.target_namespace ~ ')' }}
+  ansible.builtin.assert:
+    that: config_problems | length == 0
+    fail_msg: "{{ plan.name }}: {{ config_problems }}"
+    success_msg: >-
+      {{ plan.name }}: {{ 'ready to start' if cond.Ready | default('') == 'True'
+         else ('last run failed' if cond.Failed | default('') == 'True' else 'already migrated')
+              ~ ' (target VM exists in ' ~ plan.target_namespace ~ '; run it again with -e reset=true)' }}
+  vars:
+    conds: "{{ plan_info.resources[0].status.conditions | default([]) }}"
+    cond: "{{ dict(conds | map(attribute='type') | zip(conds | map(attribute='status'))) }}"
+    config_problems: "{{ conds | selectattr('status', 'eq', 'True') | selectattr('category', 'eq', 'Critical')
+                         | rejectattr('type', 'in', ['VMAlreadyExists', 'MacConflicts']) | map(attribute='message') | list }}"
   when: not ansible_check_mode

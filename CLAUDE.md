@@ -181,7 +181,11 @@ clusters/                      <name>.yaml, <name>.htpasswd.yml, vault.yml (giti
 - **MTV with the Portworx hook**: the hook adds the target namespace's ServiceAccount to the `fa-pxd-converter`
   ClusterRoleBinding and SCC at run time; reapplying them with a fixed subject list removes it (create the binding only
   when missing, never set the SCC's `users`). On the pod network set `preserveStaticIPs: false`, and give the guest a
-  netplan that matches the NIC driver (static on `vmxnet3`, DHCP on `virtio_net`).
+  netplan that matches the NIC driver (static on `vmxnet3`, DHCP on `virtio_net`). The hook finds a datastore's
+  offload secret in the StorageMap **by ID**: a name-only `source` fails the hook ("no offload secret found for
+  datastore"), so the role writes `{id, name}`. A Plan migrates a VM once (then `VMAlreadyExists`/`MacConflicts`); a
+  re-run needs the migrated VM gone, and MTV's finished conversion pod (labels `migration`, `vmID`) keeps the disk PVC
+  alive through `pvc-protection` until it's deleted too (`--tags run -e reset=true` does both).
 - **`oc` short names collide with ACM**: `subscription` resolves to ACM's `apps.open-cluster-management.io`
   Subscription; use `subscriptions.operators.coreos.com` for OLM.
 - **Portworx Backup 3.x needs the `pxc-credentials` Secret before `helm install`** (six keys; the pre-install hook
@@ -197,6 +201,6 @@ clusters/                      <name>.yaml, <name>.htpasswd.yml, vault.yml (giti
 
 ## Skills
 `.claude/skills/`: `ocp-upi-full` (end-to-end runbook, the entry point), `ocp-upi-deploy`, `ocp-upi-infra`,
-`ocp-upi-status`, `ocp-upi-storage`, `ocp-upi-migration`, `ocp-upi-teardown`. To also load the RHOSO skills and
+`ocp-upi-status`, `ocp-upi-storage`, `ocp-upi-migration`, `ocp-upi-migration-demo`, `ocp-upi-teardown`. To also load the RHOSO skills and
 CLAUDE.md, start Claude Code with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --add-dir ../rhoso` (or
 `/add-dir ../rhoso`). A `permissions.additionalDirectories` setting grants file access only and loads no skills.

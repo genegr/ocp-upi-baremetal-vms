@@ -7,7 +7,11 @@
 #   mtv      MTV: provider (no VDDK, ESXi clone method SSH), FlashArray secret, MTV's SSH key on the clone hosts
 #            (through vCenter), storage map with FlashArray XCOPY, network map, Portworx hook, plans (not started)
 #   ansible-playbook playbooks/migration.yml -e cluster=<name> [--tags array|vsphere|mtv] [--check]
-# A migration is started by hand: the console (Migration > Plans) or a Migration CR for the plan.
+# Run a plan (an action, only with --tags run): start it, watch it, check the VMs and report the step times.
+#   ansible-playbook playbooks/migration.yml -e cluster=<name> --tags run -e plan_name=<plan>
+#       [-e reset=true -e confirm=<plan>]   # delete the plan's previous run first (only VMs MTV created)
+#       [-e run_timeout_minutes=60]
+# See docs/migration-demo.md.
 - name: Cluster model
   hosts: localhost
   gather_facts: false
@@ -69,3 +73,14 @@
         apply:
           tags: mtv
       tags: mtv
+
+    # An action, not a desired state: never part of a plain run (tag never).
+    - name: Run plan {{ plan_name | default('?') }}
+      ansible.builtin.include_role:
+        name: migration_mtv
+        tasks_from: run.yml
+        apply:
+          tags: [never, run]
+      vars:
+        run_plan_name: "{{ plan_name | mandatory('-e plan_name=<name> (one of migration.plans)') }}"
+      tags: [never, run]

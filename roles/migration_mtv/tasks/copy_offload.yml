@@ -36,15 +36,28 @@
   register: clone_host_ids
   changed_when: false
 
-- name: StorageMap entries (one per migration datastore)
-  ansible.builtin.set_fact:
-    storage_map_entries: "{{ storage_map_entries | default([]) + [entry] }}"
+# The Portworx hook finds a datastore's offload secret in the StorageMap by ID ("no offload secret found for
+# datastore <name> (id=datastore-…) in StorageMap" with a name-only source): give both.
+- name: Migration datastores' vSphere IDs
+  ansible.builtin.command:
+    argv: [govc, find, -i, "/{{ src.datacenter }}/datastore", -type, s, -name, "{{ item.name }}"]
+  environment: "{{ govc_env }}"
   loop: "{{ co.datastores }}"
   loop_control:
     label: "{{ item.name }}"
+  register: datastore_ids
+  changed_when: false
+  failed_when: datastore_ids.stdout is not match('^Datastore:datastore-')
+
+- name: StorageMap entries (one per migration datastore)
+  ansible.builtin.set_fact:
+    storage_map_entries: "{{ storage_map_entries | default([]) + [entry] }}"
+  loop: "{{ datastore_ids.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
   vars:
     entry:
-      source: {name: "{{ item.name }}"}
+      source: {id: "{{ item.stdout | regex_replace('^Datastore:', '') }}", name: "{{ item.item.name }}"}
       destination: {storageClass: "{{ co.storageclass }}", accessMode: "{{ co.access_mode }}", volumeMode: "{{ co.volume_mode }}"}
       offloadPlugin:
         vsphereXcopyConfig:

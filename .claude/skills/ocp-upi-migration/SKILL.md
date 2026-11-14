@@ -33,8 +33,8 @@ from vSphere", `cluster.example.yaml` (`migration:`), `CLAUDE.md` gotchas (MTV, 
 | `vsphere` | the MTV user logs in and sees the datacenter; the datastore is mounted by the clone hosts |
 | `mtv` | Provider Ready (SSHNotReady may still list hosts that aren't clone hosts: harmless), StorageMap/NetworkMap Ready, the forced-command check answers `SSH_OK`, each Plan Ready |
 
-Start a migration only when the user asks: the console (Migration > Plans) or a `Migration` CR (`spec.plan` with the
-plan's name, namespace and uid). Watch `status.migration.vms[].pipeline` of the Plan, the PVCs in the target
+Start a migration only when the user asks, with the `ocp-upi-migration-demo` skill (`--tags run -e plan_name=<plan>`,
+reset with `-e reset=true -e confirm=<plan>`), or from the console (Migration > Plans). Watch `status.migration.vms[].pipeline` of the Plan, the PVCs in the target
 namespace (`prime-…` FADA volume of the populator, then `pxd-…` from the hook) and the hook pod in `openshift-mtv`.
 
 ## Triage
