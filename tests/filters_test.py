@@ -202,6 +202,12 @@ rejects("migration: copy offload needs clone hosts", bad, "needs migration.sourc
 mgc = copy.deepcopy(mg); mgc["storage"]["portworx"]["mode"] = "csi"
 check("migration: no Portworx hook in PX-CSI mode",
       cluster_model(mgc, EXAMPLE)["migration"]["copy_offload"]["portworx_hook"] is False)
+mgp = copy.deepcopy(mg); mgp["migration"]["plans"].append({"name": "p2", "vms": ["vm2"], "portworx_hook": False})
+cp = cluster_model(mgp, EXAMPLE)["migration"]["plans"]
+check("migration: per-plan hook (default inherits, false keeps FADA)",
+      [p["portworx_hook"] for p in cp] == [True, False])
+bad = copy.deepcopy(mgc); bad["migration"]["plans"][0]["portworx_hook"] = True
+rejects("migration: per-plan hook needs Enterprise mode", bad, "portworx_hook needs copy offload")
 
 # --- backup -------------------------------------------------------------------------------------------------------
 check("backup: off by default", cluster_model(base, EXAMPLE)["backup"]["enabled"] is False)

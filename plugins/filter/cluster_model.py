@@ -656,6 +656,14 @@ def _migration(c):
             _die(f"migration plan {p['name']}: type must be cold or warm")
         if co["enabled"] and p["type"] != "cold":
             _die(f"migration plan {p['name']}: copy offload migrates cold only")
+        # Per plan: move the disks onto Portworx volumes (the hook) or keep them on their FADA volumes.
+        hook_available = bool(co["enabled"] and co["portworx_hook"])
+        p.setdefault("portworx_hook", hook_available)
+        if not isinstance(p["portworx_hook"], bool):
+            _die(f"migration plan {p['name']}: portworx_hook must be true or false")
+        if p["portworx_hook"] and not hook_available:
+            _die(f"migration plan {p['name']}: portworx_hook needs copy offload, Portworx Enterprise mode and "
+                 "migration.copy_offload.portworx_hook")
     # NetworkMap pairs: destination "pod" or "<namespace>/<NetworkAttachmentDefinition>" (multus).
     m["network_map_spec"] = []
     for i, nm in enumerate(m["network_map"]):

@@ -279,7 +279,9 @@ realm and pod. So the VMs to migrate go on a migration datastore whose volume li
 
 Plans are created and validated, not started: start one from the console (Migration > Plans) or with a `Migration`
 CR. Measured in the lab (30 GiB Ubuntu VM): about 1 min disk transfer, 4.5 min guest conversion, 3.5 min Portworx hook.
-Without the hook (`portworx_hook: false`) the VM stays on its FADA volumes: shorter, with array-native data services.
+Without the hook the VM stays on its FADA volumes: shorter, with array-native data services. Per plan with
+`plans[].portworx_hook: false`; `copy_offload.portworx_hook` is the default for every plan (and `false` there makes
+the hook unavailable).
 
 ## Optional: Portworx Backup
 

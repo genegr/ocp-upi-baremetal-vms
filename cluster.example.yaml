@@ -229,6 +229,7 @@ identity:
 #     - {source: VM Network, destination: pod}          # or <namespace>/<network-attachment>
 #   plans:
 #     - {name: first-wave, vms: [vm1, vm2], target_namespace: migrated}
+#     - {name: keep-on-fada, vms: [db1], target_namespace: migrated, portworx_hook: false}  # disks stay on FADA
 
 tools:
   tofu_version: 1.12.6
