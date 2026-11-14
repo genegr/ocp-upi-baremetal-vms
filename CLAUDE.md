@@ -56,6 +56,28 @@ drives every phase, from a pinned toolbox container on a Docker jump box. Human 
   are created. Never point a cluster at another cluster's realm. The admin token stays in the vault; the realm user's
   token lives only in `.state/clusters/<name>/` and in the `px-pure-secret` Secret.
 
+## Short and spoken prompts
+Prompts are often dictated (`/voice`): short, with no flags or file names, and with words misheard.
+- **Map the words**:
+  - "O C P", "open shift", "the cluster" → this repo.
+  - "rose so", "row so", "R H O S O", "OpenStack", "the cloud" → the sibling RHOSO checkout `../rhoso` (its own
+    CLAUDE.md and skills; read them from there when they aren't loaded).
+  - "port works", "PX" → Portworx.
+  - "flash array", "the array", "Pure" → the FlashArray.
+  - "jump box" → `SYNC_HOST`.
+- **Entry points**:
+  - "deploy / rebuild / continue the cluster", "where are we" → skill `ocp-upi-full`.
+  - "is it up?" → `ocp-upi-status`.
+  - Anything with OpenStack, or "the whole lab" → `../rhoso/.claude/skills/rhoso-lab/SKILL.md`.
+- **Target**: with one non-example `clusters/*.yaml`, use it and say its name back in the first line. With several,
+  ask.
+- **Gates stay gates**: a dictated "deploy it" covers the steps, never consent. Shared DNS, the FlashArray,
+  `destroy.yml` and storage teardown still need a yes in a reply to the shown plan. Treat "clean up", "reset",
+  "wipe" and "start over" as possibly destructive: say what would be deleted and ask. Ask too when a name, a host or
+  a number reads garbled.
+- **Replies**: first a one-line plan (the steps, the time, where it will stop for a yes). Then a line per finished
+  step. At the end a few plain sentences, without tables.
+
 ## Checks before declaring a change done (in the toolbox)
 - `python3 tests/filters_test.py`
 - `ansible-playbook <each playbook> --syntax-check -e cluster=<name>`
@@ -174,5 +196,7 @@ clusters/                      <name>.yaml, <name>.htpasswd.yml, vault.yml (giti
   FlashBlade: test S3 keys with the AWS CLI (`AWS_REQUEST_CHECKSUM_CALCULATION=when_required`).
 
 ## Skills
-`.claude/skills/`: `ocp-upi-deploy`, `ocp-upi-infra`, `ocp-upi-status`, `ocp-upi-storage`, `ocp-upi-migration`,
-`ocp-upi-teardown`.
+`.claude/skills/`: `ocp-upi-full` (end-to-end runbook, the entry point), `ocp-upi-deploy`, `ocp-upi-infra`,
+`ocp-upi-status`, `ocp-upi-storage`, `ocp-upi-migration`, `ocp-upi-teardown`. To also load the RHOSO skills and
+CLAUDE.md, start Claude Code with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --add-dir ../rhoso` (or
+`/add-dir ../rhoso`). A `permissions.additionalDirectories` setting grants file access only and loads no skills.
