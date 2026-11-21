@@ -4,7 +4,10 @@
 #   every transport  /etc/multipath.conf + udev rules (vendor settings), multipathd enabled
 #   nvme-tcp/-rdma   nvme_tcp / nvme_rdma loaded at boot, a unique NVMe host NQN per node (RHCOS ships one for all);
 #                    Portworx Enterprise also needs native NVMe multipath off (c.storage.kernel_args)
-#   iscsi            iscsid enabled (RHCOS generates a unique initiator name at first boot)
+#   iscsi            iscsid enabled (RHCOS generates a unique initiator name at first boot); with
+#                    storage.portworx.iscsi.allowed_ifaces, one open-iscsi interface record per name in
+#                    /var/lib/iscsi/ifaces (PX-CSI's node plugin exits with "no ifaces of '' match allowed ifaces"
+#                    when a name is missing from `iscsiadm -m iface`, and every node then crash-loops)
 # Another transport's MachineConfig (or the older 99-<role>-pure-storage) is removed in the same run, so a transport
 # switch is one render and one rolling reboot, one node at a time.
 # The rendered config each pool targets before the change: a changed MachineConfig counts as rolled out only once the
@@ -33,7 +36,7 @@
           ignition:
             version: 3.2.0
           storage:
-            files: "{{ storage_mc_files + (storage_mc_nvme_files if nvme else []) }}"
+            files: "{{ storage_mc_files + (storage_mc_nvme_files if nvme else storage_mc_iscsi_files if iscsi else []) }}"
           systemd:
             units: "{{ storage_mc_units + (storage_mc_nvme_units if nvme else storage_mc_iscsi_units if iscsi else []) }}"
   loop: "{{ c.storage.mc_roles }}"
@@ -59,6 +62,16 @@
         overwrite: true
         contents:
           source: "data:text/plain;charset=utf-8;base64,{{ (nvme_module ~ '\n') | b64encode }}"
+    # The record iscsiadm itself would write for `-I <name> --op=new` plus net_ifacename: the iface, bound to the NIC of
+    # the same name, over TCP. Mode 0600, as iscsiadm creates it.
+    storage_mc_iscsi_files: >-
+      {%- set files = [] -%}
+      {%- for n in c.storage.portworx.iscsi.allowed_ifaces -%}
+      {%- set record = 'iface.iscsi_ifacename = ' ~ n ~ '\niface.net_ifacename = ' ~ n ~ '\niface.transport_name = tcp\n' -%}
+      {%- set _ = files.append({'path': '/var/lib/iscsi/ifaces/' ~ n, 'mode': 384, 'overwrite': true,
+                                'contents': {'source': 'data:text/plain;charset=utf-8;base64,' ~ (record | b64encode)}}) -%}
+      {%- endfor -%}
+      {{ files }}
     storage_mc_units:
       - name: multipathd.service
         enabled: true

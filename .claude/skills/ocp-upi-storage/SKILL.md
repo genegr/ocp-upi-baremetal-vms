@@ -35,6 +35,12 @@ Everything runs from the toolbox on the jump box (prefix in the `ocp-upi-deploy`
 Transport: `storage.portworx.san_type` picks the node MachineConfig (`99-<role>-pure-nvme-tcp` or `-iscsi`); a
 switch removes the other one in the same run (one rolling reboot) and needs the storage NICs on the new VLANs (`nics`,
 `network`). iSCSI gets `PURE_ISCSI_ALLOWED_CIDRS` from `storage.networks`, so Portworx ignores unreachable portals.
+Opt-in on top: `storage.portworx.iscsi.allowed_ifaces` (`PURE_ISCSI_ALLOWED_IFACES`: the node's NIC names, read them
+from `oc get nns <node>`; never copy `eth3,eth4` from another platform; the `node` phase also writes an open-iscsi
+interface record per name, which PX-CSI requires: without it every node plugin exits with "no ifaces of '' match
+allowed ifaces" and crash-loops) and `iscsi.subnet_aware_login`
+(`ENABLE_SUBNET_AWARE_ISCSI_LOGIN`). Before choosing storage addresses on an iSCSI VLAN, look for a DHCP service on it
+(a pool there is why `host_offset` exists) and for the addresses other hosts use; probe with ARP.
 
 Modes: `storage.portworx.mode: csi` (PX-CSI only) or `enterprise`. In enterprise mode Portworx builds a Kube Datastore
 per FlashArray automatically (`pxctl kubedatastore list`) and the operator adds `px-rwx-*-kubevirt-<array>` classes

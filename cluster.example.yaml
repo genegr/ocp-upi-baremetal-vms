@@ -134,6 +134,9 @@ identity:
 #     - {name: data-a, nic: 1, cidr: 198.51.100.0/24, host: same}   # nic 1 = first extra NIC; host: same = the node's
 #     - {name: data-b, nic: 2, cidr: 203.0.113.0/24, host: same}    #   host number on the machine network (or host_offset: N)
 #     #   mtu: 1500 (default)
+#     # host_offset: N instead of host: same gives node i the address N+i of the network, counting the bootstrap as
+#     # i=0 (N=100: the three masters of a compact cluster get .101-.103): use it where `host: same` would land in a
+#     # DHCP pool or on addresses other hosts use on the same VLAN.
 #   flasharray:
 #     endpoint: 192.0.2.40            # management address
 #     token_var: vault_flasharray_api_token   # vault variable with this array's admin API token
@@ -150,6 +153,11 @@ identity:
 #   portworx:
 #     enabled: true
 #     san_type: NVMEOF-TCP            # or ISCSI (both need networks), FC, NVMEOF-RDMA
+#     # iscsi:                        # san_type ISCSI only; PURE_ISCSI_ALLOWED_CIDRS always comes from storage.networks
+#     #   allowed_ifaces: [ens34, ens35]   # PURE_ISCSI_ALLOWED_IFACES: the node's NIC names (RHCOS: ens*, check
+#     #                                    # `oc get nns <node>`); the portworx phase asserts they exist on every node,
+#     #                                    # and the node phase adds an open-iscsi interface record per name
+#     #   subnet_aware_login: true         # ENABLE_SUBNET_AWARE_ISCSI_LOGIN: needs PX-CSI >= 26.1
 #     # channel: stable
 #     # operator_csv: portworx-operator.v26.4.0
 #     # image: portworx/px-pure-csi-driver:26.3.0

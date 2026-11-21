@@ -153,6 +153,31 @@ check("storage: iSCSI limits Portworx to the storage networks' portals",
       and ci["portworx"]["env"][1]["value"] == ",".join(n["cidr"] for n in ent_iscsi["storage"]["networks"]))
 check("storage: NVMe/TCP env is the SAN type only",
       cs["storage"]["portworx"]["env"] == [{"name": "PURE_FLASHARRAY_SAN_TYPE", "value": "NVMEOF-TCP"}])
+# compact cluster over iSCSI with the interface list and subnet-aware login (PX-CSI mode)
+ic = copy.deepcopy(st)
+ic["storage"]["portworx"].update({"san_type": "ISCSI", "iscsi": {"allowed_ifaces": ["ens34", "ens35"], "subnet_aware_login": True}})
+ic["storage"]["networks"] = [{"name": "iscsi-a", "nic": 1, "cidr": "198.51.100.0/24", "host_offset": 100},
+                             {"name": "iscsi-b", "nic": 2, "cidr": "203.0.113.0/24", "host_offset": 100}]
+cic = cluster_model(ic, EXAMPLE)
+check("storage: compact iSCSI env = SAN type, interfaces, subnet-aware login, CIDRs (in that order)",
+      [(e["name"], e["value"]) for e in cic["storage"]["portworx"]["env"]]
+      == [("PURE_FLASHARRAY_SAN_TYPE", "ISCSI"), ("PURE_ISCSI_ALLOWED_IFACES", "ens34,ens35"),
+          ("ENABLE_SUBNET_AWARE_ISCSI_LOGIN", "true"), ("PURE_ISCSI_ALLOWED_CIDRS", "198.51.100.0/24,203.0.113.0/24")])
+check("storage: a bare host_offset (no `host`) selects offset mode and counts the bootstrap: masters get .101-.103",
+      [n["storage"][0]["address"] for n in cic["nodes"] if n["role"] == "master"]
+      == ["198.51.100.101", "198.51.100.102", "198.51.100.103"])
+ic_default = copy.deepcopy(ic); ic_default["storage"]["portworx"]["iscsi"] = {}
+check("storage: the iSCSI options are off by default (CIDRs only)",
+      [e["name"] for e in cluster_model(ic_default, EXAMPLE)["storage"]["portworx"]["env"]]
+      == ["PURE_FLASHARRAY_SAN_TYPE", "PURE_ISCSI_ALLOWED_CIDRS"])
+bad = copy.deepcopy(ic); bad["storage"]["portworx"]["iscsi"]["allowed_ifaces"] = ["eth 3"]
+rejects("storage: interface names are validated", bad, "allowed_ifaces must be a list")
+bad = copy.deepcopy(ic); bad["storage"]["portworx"]["iscsi"]["allowed_ifaces"] = ["ens34", "ens34"]
+rejects("storage: interface names are distinct", bad, "allowed_ifaces must be a list")
+bad = copy.deepcopy(ic); bad["storage"]["portworx"]["iscsi"]["subnet_aware_login"] = "yes"
+rejects("storage: subnet_aware_login is a bool", bad, "subnet_aware_login must be true or false")
+bad = copy.deepcopy(ic); bad["storage"]["portworx"]["san_type"] = "NVMEOF-TCP"
+rejects("storage: the iSCSI options need san_type ISCSI", bad, "need storage.portworx.san_type ISCSI")
 
 # --- addons -------------------------------------------------------------------------------------------------------
 ad = copy.deepcopy(base)

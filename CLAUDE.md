@@ -145,6 +145,16 @@ clusters/                      <name>.yaml, <name>.htpasswd.yml, vault.yml (giti
   on kvdb). Use iSCSI there (`PURE_ISCSI_ALLOWED_CIDRS`, derived from `storage.networks`, keeps PX off unreachable
   portals), or an array whose FC ports serve SCSI only. Before a retry, uninstall the StorageCluster
   (UninstallAndDelete) and remove the NVMe hosts PX left in the realm.
+- **`PURE_ISCSI_ALLOWED_IFACES` takes the host's NIC names**, which on RHCOS/vSphere are `ens33` (machine network),
+  `ens34`, `ens35`, never `eth3,eth4` as in specs from other platforms (nothing would match and login would fail):
+  `storage.portworx.iscsi.allowed_ifaces`, checked by the `portworx` role against NodeNetworkState.
+  `ENABLE_SUBNET_AWARE_ISCSI_LOGIN` needs PX-CSI >= 26.1. A `host_offset` without `host:` selects offset mode; before
+  this fix it was silently ignored in favour of `host: same`. **Every allowed name must also be an open-iscsi
+  interface record** (`iscsiadm -m iface`, a file in `/var/lib/iscsi/ifaces/`, `iface.net_ifacename` = the NIC):
+  RHCOS has only `default` and `iser`, so the PX-CSI node plugin exits with "no ifaces of '' match allowed ifaces
+  'ens34,ens35'" and every node crash-loops (the StorageCluster stays Degraded and the phase times out). The `node`
+  phase puts the records in the iSCSI MachineConfig and checks them. Quick fix on a node: `iscsiadm -m iface -I <nic>
+  --op=new` and `--op=update -n iface.net_ifacename -v <nic>`, then delete the node plugin Pod.
 - **PX-CSI integration in Portworx Enterprise is one-way** (`portworx.io/pure-csi-integration`): once on, it can't be
   disabled. It needs PX Enterprise ≥ 3.7.0 and serves the FADA volumes. The license is activated through `pxctl` in a
   Portworx pod (`k8s_exec`), only while the SKU reads Trial.

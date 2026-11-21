@@ -198,10 +198,16 @@ connections and keeps hosts that still carry other volumes.
 Configure the `storage` section (see `cluster.example.yaml`):
 - the data NICs: `roles.<role>.extra_networks`, on the nodes that run workloads (workers, or the masters of a compact
   cluster);
-- `storage.networks`: their static addresses. `host: same` reuses each node's host number from the machine network.
-  Check the addresses are free first;
+- `storage.networks`: their static addresses. `host: same` reuses each node's host number from the machine network;
+  `host_offset: N` gives node i the address N+i (the bootstrap counts as i=0), for VLANs where those numbers fall in a
+  DHCP pool or are used by other hosts. Check the addresses are free first (ARP probe from a node on that VLAN);
 - `storage.flasharray`: management endpoint, realm quota, names (defaults come from the cluster name);
-- `storage.portworx.enabled: true`.
+- `storage.portworx.enabled: true`. Over iSCSI (`san_type: ISCSI`) the StorageCluster always gets
+  `PURE_ISCSI_ALLOWED_CIDRS` from `storage.networks`. Two more settings are opt-in: `iscsi.allowed_ifaces`
+  (`PURE_ISCSI_ALLOWED_IFACES`, the nodes' own NIC names, `ens34` and so on; the `portworx` phase checks they exist on
+  every node) and `iscsi.subnet_aware_login` (`ENABLE_SUBNET_AWARE_ISCSI_LOGIN`, PX-CSI 26.1 or later). PX-CSI also
+  needs each allowed name as an open-iscsi interface record (`iscsiadm -m iface`): the `node` phase writes them into
+  the iSCSI MachineConfig (`/var/lib/iscsi/ifaces/<name>`) and checks them on every node.
 
 Add `vault_flasharray_api_token` to `clusters/vault.yml`.
 

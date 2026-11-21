@@ -42,6 +42,37 @@
   no_log: true
   when: realm_token.stat.exists and (not ansible_check_mode or olm_csv_ready)
 
+# PURE_ISCSI_ALLOWED_IFACES (storage.portworx.iscsi.allowed_ifaces) must name the nodes' own NICs: a name that exists on
+# no node matches nothing, and every iSCSI login then fails (eth3,eth4 from another platform's spec is the classic).
+# Checked here, against NodeNetworkState, before the StorageCluster carries it.
+- name: Node network state of the storage nodes
+  kubernetes.core.k8s_info:
+    api_version: nmstate.io/v1beta1
+    kind: NodeNetworkState
+    name: "{{ item.hostname }}"
+  register: px_nns
+  until: px_nns.resources | default([]) | length == 1
+  retries: 12
+  delay: 10
+  loop: "{{ storage_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: px.iscsi.allowed_ifaces | length > 0 and not ansible_check_mode
+
+- name: The interfaces in allowed_ifaces exist on every storage node
+  ansible.builtin.assert:
+    that: px.iscsi.allowed_ifaces | difference(names) | length == 0
+    fail_msg: >-
+      {{ item.item.name }} has no interface {{ px.iscsi.allowed_ifaces | difference(names) }}
+      (allowed_ifaces {{ px.iscsi.allowed_ifaces }}); its interfaces are {{ names }}
+    quiet: true
+  vars:
+    names: "{{ item.resources[0] | nns_ifaces_by_mac | dict2items | map(attribute='value') | sort | list }}"
+  loop: "{{ px_nns.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: px.iscsi.allowed_ifaces | length > 0 and not ansible_check_mode
+
 - name: StorageCluster (PX-CSI)
   kubernetes.core.k8s:
     definition:

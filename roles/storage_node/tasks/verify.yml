@@ -57,22 +57,27 @@
                 echo "hostnqn=$(cat /host/etc/nvme/hostnqn 2>/dev/null)";
                 echo "iqn=$(sed -n 's/^InitiatorName=//p' /host/etc/iscsi/initiatorname.iscsi 2>/dev/null)";
                 echo "iscsid=$(ls /host/etc/systemd/system/*.wants/iscsid.service >/dev/null 2>&1 && echo enabled || echo disabled)";
+                echo "iscsi_ifaces=$(ls /host/iscsi-ifaces 2>/dev/null | tr '\n' ',')";
                 echo "multipath_conf=$(test -s /host/etc/multipath.conf && echo yes || echo no)";
                 echo "udev_rules=$(test -s /host/etc/udev/rules.d/99-pure-storage.rules && echo yes || echo no)";
                 echo "nvme_module=$(test -d /sys/module/{{ 'nvme_rdma' if c.storage.transport == 'nvme-rdma' else 'nvme_tcp' }} && echo yes || echo no)";
                 echo "nvme_multipath=$(cat /sys/module/nvme_core/parameters/multipath 2>/dev/null || echo none)"
             securityContext:
               privileged: true
-            volumeMounts:
-              - {name: etc, mountPath: /host/etc, readOnly: true}
-        volumes:
-          - {name: etc, hostPath: {path: /etc}}
+            volumeMounts: >-
+              {{ [{'name': 'etc', 'mountPath': '/host/etc', 'readOnly': true}]
+                 + ([{'name': 'iscsi-ifaces', 'mountPath': '/host/iscsi-ifaces', 'readOnly': true}] if iscsi else []) }}
+        volumes: >-
+          {{ [{'name': 'etc', 'hostPath': {'path': '/etc'}}]
+             + ([{'name': 'iscsi-ifaces', 'hostPath': {'path': '/var/lib/iscsi/ifaces'}}] if iscsi else []) }}
     wait: true
     wait_condition:
       type: Ready
       status: "False"
       reason: PodCompleted
     wait_timeout: 300
+  vars:
+    iscsi: "{{ c.storage.transport == 'iscsi' }}"
   loop: "{{ storage_nodes }}"
   loop_control:
     label: "{{ item.name }}"
@@ -117,6 +122,9 @@
       - not nvme or storage_node_facts.values() | map(attribute='nvme_multipath') | unique
         == [('N' if 'nvme_core.multipath=N' in c.storage.kernel_args else 'Y')]
       - not iscsi or storage_node_facts.values() | map(attribute='iscsid') | unique == ['enabled']
+      - not (iscsi and px_ifaces)
+        or storage_node_facts.values() | map(attribute='iscsi_ifaces') | map('split', ',') | map('intersect', px_ifaces)
+           | map('length') | unique == [px_ifaces | length]
     fail_msg: "{{ storage_node_facts | to_json }}"
     success_msg: "{{ storage_node_facts | dict2items | map(attribute='key')
                      | zip(storage_node_facts.values() | map(attribute=host_id)) | map('join', ' ') | list }}"
@@ -124,3 +132,4 @@
     nvme: "{{ c.storage.transport.startswith('nvme') }}"
     iscsi: "{{ c.storage.transport == 'iscsi' }}"
     host_id: "{{ 'iqn' if iscsi else 'hostnqn' }}"
+    px_ifaces: "{{ c.storage.portworx.iscsi.allowed_ifaces }}"

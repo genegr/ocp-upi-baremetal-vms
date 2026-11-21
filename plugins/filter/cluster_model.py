@@ -124,6 +124,10 @@ DEFAULTS = {
             "operator_csv": "portworx-operator.v26.4.0",
             "image": "portworx/px-pure-csi-driver:26.3.0",       # csi mode
             "san_type": "NVMEOF-TCP",
+            # iSCSI only, both opt-in. allowed_ifaces: PURE_ISCSI_ALLOWED_IFACES, the HOST NIC names (ens34, not a
+            # guess: the portworx role checks them on every node). subnet_aware_login:
+            # ENABLE_SUBNET_AWARE_ISCSI_LOGIN, initiator and target interfaces matched by subnet (PX-CSI >= 26.1).
+            "iscsi": {"allowed_ifaces": [], "subnet_aware_login": False},
             "namespace": "portworx",
             "storageclass": {"name": "px-fa", "default": False},  # the FADA StorageClass (both modes)
             "enterprise": {
@@ -486,7 +490,8 @@ def _storage(c, nodes, net):
         except ValueError as exc:
             _die(f"storage network {sn['name']}: {exc}")
         sn.setdefault("mtu", 1500)
-        host = sn.get("host", "same")
+        # A host_offset without `host` means offset mode (it used to be ignored: `same` was the default).
+        host = sn.get("host", "offset" if "host_offset" in sn else "same")
         if host != "same" and "host_offset" not in sn:
             _die(f"storage network {sn['name']}: host must be 'same' or set host_offset")
         # Storage IPs go on the nodes that run workloads: workers, or the masters of a compact cluster.
@@ -538,9 +543,19 @@ def _storage(c, nodes, net):
                         r"^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$", str(fa[key])):
             _die(f"storage.flasharray.{key} '{fa[key]}' must be letters, digits and '-'")
     px = st["portworx"]
+    iscsi = px["iscsi"]
+    ifaces = iscsi["allowed_ifaces"]
+    if (not isinstance(ifaces, list) or len(set(ifaces)) != len(ifaces)
+            or not all(isinstance(i, str) and re.match(r"^[A-Za-z0-9_.:-]{1,15}$", i) for i in ifaces)):
+        _die("storage.portworx.iscsi.allowed_ifaces must be a list of distinct interface names "
+             "(letters, digits and '_.:-', at most 15 characters)")
+    if not isinstance(iscsi["subnet_aware_login"], bool):
+        _die("storage.portworx.iscsi.subnet_aware_login must be true or false")
     if px["enabled"]:
         if not fa["endpoint"]:
             _die("storage.portworx.enabled needs storage.flasharray.endpoint")
+        if (ifaces or iscsi["subnet_aware_login"]) and px["san_type"] != "ISCSI":
+            _die("storage.portworx.iscsi options need storage.portworx.san_type ISCSI")
         if px["san_type"] not in ("NVMEOF-TCP", "ISCSI", "FC", "NVMEOF-RDMA"):
             _die("storage.portworx.san_type must be NVMEOF-TCP, ISCSI, FC or NVMEOF-RDMA")
         if px["san_type"] in ("NVMEOF-TCP", "ISCSI") and not st["networks"]:
@@ -565,8 +580,14 @@ def _storage(c, nodes, net):
     # Portworx env. iSCSI: log in only to the array's portals on the storage networks (an array can have iSCSI
     # interfaces on subnets the nodes don't reach, and a failed login fails the attach).
     px["env"] = [{"name": "PURE_FLASHARRAY_SAN_TYPE", "value": px["san_type"]}]
-    if st["transport"] == "iscsi" and st["networks"]:
-        px["env"].append({"name": "PURE_ISCSI_ALLOWED_CIDRS", "value": ",".join(sn["cidr"] for sn in st["networks"])})
+    if st["transport"] == "iscsi":
+        if ifaces:
+            px["env"].append({"name": "PURE_ISCSI_ALLOWED_IFACES", "value": ",".join(ifaces)})
+        if iscsi["subnet_aware_login"]:
+            px["env"].append({"name": "ENABLE_SUBNET_AWARE_ISCSI_LOGIN", "value": "true"})
+        if st["networks"]:
+            px["env"].append({"name": "PURE_ISCSI_ALLOWED_CIDRS",
+                              "value": ",".join(sn["cidr"] for sn in st["networks"])})
 
 
 def _image_version(image):
