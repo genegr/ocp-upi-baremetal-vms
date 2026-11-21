@@ -93,7 +93,8 @@ playbooks/                     deploy (tags = phases), infra, users, rolling_upd
                                only with --tags teardown), addons, migration (tags array, vsphere, mtv), backup, status, destroy,
                                tools/oc
 roles/                         one per phase; vms is reused by bootstrap, install_complete, rolling_update, destroy;
-                               olm_operator installs one pinned OLM operator (Manual approval)
+                               olm_operator installs one pinned OLM operator (Manual approval); storage_ifaces reads the
+                               storage NICs' names from the running nodes (for storage_node and portworx)
 plugins/filter|modules         cluster_model, htpasswd, k8s; ocp_csr_approve, purefa_realm_admin, purefa_resource_access,
                                purefa_volume_info
 platforms/<name>/              OpenTofu module + tasks/{credentials,preflight,post_apply,vm_state,console}.yml
@@ -146,15 +147,16 @@ clusters/                      <name>.yaml, <name>.htpasswd.yml, vault.yml (giti
   portals), or an array whose FC ports serve SCSI only. Before a retry, uninstall the StorageCluster
   (UninstallAndDelete) and remove the NVMe hosts PX left in the realm.
 - **`PURE_ISCSI_ALLOWED_IFACES` takes the host's NIC names**, which on RHCOS/vSphere are `ens33` (machine network),
-  `ens34`, `ens35`, never `eth3,eth4` as in specs from other platforms (nothing would match and login would fail):
-  `storage.portworx.iscsi.allowed_ifaces`, checked by the `portworx` role against NodeNetworkState.
-  `ENABLE_SUBNET_AWARE_ISCSI_LOGIN` needs PX-CSI >= 26.1. A `host_offset` without `host:` selects offset mode; before
-  this fix it was silently ignored in favour of `host: same`. **Every allowed name must also be an open-iscsi
-  interface record** (`iscsiadm -m iface`, a file in `/var/lib/iscsi/ifaces/`, `iface.net_ifacename` = the NIC):
-  RHCOS has only `default` and `iser`, so the PX-CSI node plugin exits with "no ifaces of '' match allowed ifaces
-  'ens34,ens35'" and every node crash-loops (the StorageCluster stays Degraded and the phase times out). The `node`
-  phase puts the records in the iSCSI MachineConfig and checks them. Quick fix on a node: `iscsiadm -m iface -I <nic>
-  --op=new` and `--op=update -n iface.net_ifacename -v <nic>`, then delete the node plugin Pod.
+  `ens34`, `ens35`, never `eth3,eth4` as in specs from other platforms (nothing would match and login would fail).
+  They are not configured: `storage.portworx.iscsi.bind_interfaces` makes the `storage_ifaces` role read, from the
+  running nodes' NodeNetworkState, the NIC of each storage network (by MAC). `ENABLE_SUBNET_AWARE_ISCSI_LOGIN` needs
+  PX-CSI >= 26.1. A `host_offset` without `host:` selects offset mode; before this fix it was silently ignored in
+  favour of `host: same`. **Every allowed NIC must also be an open-iscsi interface record** (`iscsiadm -m iface`, a
+  file in `/var/lib/iscsi/ifaces/`, `iface.net_ifacename` = the NIC): RHCOS has only `default` and `iser`, so the
+  PX-CSI node plugin exits with "no ifaces of '' match allowed ifaces 'ens34,ens35'" and every node crash-loops (the
+  StorageCluster stays Degraded and the phase times out). The `node` phase declares the records as files in the
+  iSCSI MachineConfig and checks them. Never create them by hand with `iscsiadm` on a node: the MachineConfig is the
+  configuration.
 - **PX-CSI integration in Portworx Enterprise is one-way** (`portworx.io/pure-csi-integration`): once on, it can't be
   disabled. It needs PX Enterprise ≥ 3.7.0 and serves the FADA volumes. The license is activated through `pxctl` in a
   Portworx pod (`k8s_exec`), only while the SKU reads Trial.

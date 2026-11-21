@@ -3,7 +3,8 @@
 # Phases (tags), in order; each is idempotent, run --check first:
 #   nics       add the storage NICs (roles.<role>.extra_networks) one node at a time (rolling_update)
 #   network    NMState operator + static storage IPs on those NICs (storage.networks)
-#   node       MachineConfig: multipath/udev, iscsid/multipathd, nvme_tcp, unique NVMe host NQN (rolling reboot)
+#   node       MachineConfig: multipath/udev, iscsid/multipathd, nvme_tcp, unique NVMe host NQN, open-iscsi interface
+#              records for the storage NICs read from the nodes (rolling reboot)
 #   flasharray realm (+quota), pod, management-access policy, realm user + API token (admin token: storage.flasharray.token_var)
 #   portworx   PX-CSI operator (pinned), px-pure-secret, StorageCluster, StorageClass
 #   smoke      opt-in end-to-end check: -e storage_smoke_test=true

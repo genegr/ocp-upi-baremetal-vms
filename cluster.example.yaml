@@ -154,9 +154,10 @@ identity:
 #     enabled: true
 #     san_type: NVMEOF-TCP            # or ISCSI (both need networks), FC, NVMEOF-RDMA
 #     # iscsi:                        # san_type ISCSI only; PURE_ISCSI_ALLOWED_CIDRS always comes from storage.networks
-#     #   allowed_ifaces: [ens34, ens35]   # PURE_ISCSI_ALLOWED_IFACES: the node's NIC names (RHCOS: ens*, check
-#     #                                    # `oc get nns <node>`); the portworx phase asserts they exist on every node,
-#     #                                    # and the node phase adds an open-iscsi interface record per name
+#     #   bind_interfaces: true            # PURE_ISCSI_ALLOWED_IFACES: only the NICs of the storage networks. No names
+#     #                                    # here: the node phase reads them from the running nodes (NodeNetworkState,
+#     #                                    # by MAC), declares an open-iscsi interface record per NIC in the MachineConfig,
+#     #                                    # and the portworx phase uses the same names
 #     #   subnet_aware_login: true         # ENABLE_SUBNET_AWARE_ISCSI_LOGIN: needs PX-CSI >= 26.1
 #     # channel: stable
 #     # operator_csv: portworx-operator.v26.4.0

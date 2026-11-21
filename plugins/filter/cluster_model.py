@@ -124,10 +124,12 @@ DEFAULTS = {
             "operator_csv": "portworx-operator.v26.4.0",
             "image": "portworx/px-pure-csi-driver:26.3.0",       # csi mode
             "san_type": "NVMEOF-TCP",
-            # iSCSI only, both opt-in. allowed_ifaces: PURE_ISCSI_ALLOWED_IFACES, the HOST NIC names (ens34, not a
-            # guess: the portworx role checks them on every node). subnet_aware_login:
-            # ENABLE_SUBNET_AWARE_ISCSI_LOGIN, initiator and target interfaces matched by subnet (PX-CSI >= 26.1).
-            "iscsi": {"allowed_ifaces": [], "subnet_aware_login": False},
+            # iSCSI only, both opt-in. bind_interfaces: PX-CSI uses only the NICs of the storage networks
+            # (PURE_ISCSI_ALLOWED_IFACES). Their names are not configured: once the cluster runs, the storage_ifaces
+            # role reads them from the nodes, and the node MachineConfig declares the open-iscsi interface record each
+            # one needs. subnet_aware_login: ENABLE_SUBNET_AWARE_ISCSI_LOGIN, initiator and target interfaces matched
+            # by subnet (PX-CSI >= 26.1).
+            "iscsi": {"bind_interfaces": False, "subnet_aware_login": False},
             "namespace": "portworx",
             "storageclass": {"name": "px-fa", "default": False},  # the FADA StorageClass (both modes)
             "enterprise": {
@@ -544,17 +546,16 @@ def _storage(c, nodes, net):
             _die(f"storage.flasharray.{key} '{fa[key]}' must be letters, digits and '-'")
     px = st["portworx"]
     iscsi = px["iscsi"]
-    ifaces = iscsi["allowed_ifaces"]
-    if (not isinstance(ifaces, list) or len(set(ifaces)) != len(ifaces)
-            or not all(isinstance(i, str) and re.match(r"^[A-Za-z0-9_.:-]{1,15}$", i) for i in ifaces)):
-        _die("storage.portworx.iscsi.allowed_ifaces must be a list of distinct interface names "
-             "(letters, digits and '_.:-', at most 15 characters)")
-    if not isinstance(iscsi["subnet_aware_login"], bool):
-        _die("storage.portworx.iscsi.subnet_aware_login must be true or false")
+    if "allowed_ifaces" in iscsi:
+        _die("storage.portworx.iscsi.allowed_ifaces is gone: the NIC names are read from the nodes, "
+             "set storage.portworx.iscsi.bind_interfaces: true instead")
+    for key in ("bind_interfaces", "subnet_aware_login"):
+        if not isinstance(iscsi[key], bool):
+            _die(f"storage.portworx.iscsi.{key} must be true or false")
     if px["enabled"]:
         if not fa["endpoint"]:
             _die("storage.portworx.enabled needs storage.flasharray.endpoint")
-        if (ifaces or iscsi["subnet_aware_login"]) and px["san_type"] != "ISCSI":
+        if (iscsi["bind_interfaces"] or iscsi["subnet_aware_login"]) and px["san_type"] != "ISCSI":
             _die("storage.portworx.iscsi options need storage.portworx.san_type ISCSI")
         if px["san_type"] not in ("NVMEOF-TCP", "ISCSI", "FC", "NVMEOF-RDMA"):
             _die("storage.portworx.san_type must be NVMEOF-TCP, ISCSI, FC or NVMEOF-RDMA")
@@ -578,11 +579,10 @@ def _storage(c, nodes, net):
     nvme_enterprise = px["enabled"] and px["mode"] == "enterprise" and st["transport"].startswith("nvme")
     st["kernel_args"] = ["nvme_core.multipath=N"] if nvme_enterprise else []
     # Portworx env. iSCSI: log in only to the array's portals on the storage networks (an array can have iSCSI
-    # interfaces on subnets the nodes don't reach, and a failed login fails the attach).
+    # interfaces on subnets the nodes don't reach, and a failed login fails the attach). With bind_interfaces the
+    # portworx role puts PURE_ISCSI_ALLOWED_IFACES second, once it has read the NIC names from the nodes.
     px["env"] = [{"name": "PURE_FLASHARRAY_SAN_TYPE", "value": px["san_type"]}]
     if st["transport"] == "iscsi":
-        if ifaces:
-            px["env"].append({"name": "PURE_ISCSI_ALLOWED_IFACES", "value": ",".join(ifaces)})
         if iscsi["subnet_aware_login"]:
             px["env"].append({"name": "ENABLE_SUBNET_AWARE_ISCSI_LOGIN", "value": "true"})
         if st["networks"]:

@@ -5,13 +5,19 @@
 #   nvme-tcp/-rdma   nvme_tcp / nvme_rdma loaded at boot, a unique NVMe host NQN per node (RHCOS ships one for all);
 #                    Portworx Enterprise also needs native NVMe multipath off (c.storage.kernel_args)
 #   iscsi            iscsid enabled (RHCOS generates a unique initiator name at first boot); with
-#                    storage.portworx.iscsi.allowed_ifaces, one open-iscsi interface record per name in
-#                    /var/lib/iscsi/ifaces (PX-CSI's node plugin exits with "no ifaces of '' match allowed ifaces"
-#                    when a name is missing from `iscsiadm -m iface`, and every node then crash-loops)
+#                    storage.portworx.iscsi.bind_interfaces, one open-iscsi interface record per storage NIC in
+#                    /var/lib/iscsi/ifaces, declared as MachineConfig files (PX-CSI's node plugin exits with "no ifaces
+#                    of '' match allowed ifaces" when a name is missing from `iscsiadm -m iface`, and every node then
+#                    crash-loops). The NIC names are read from the running nodes (storage_ifaces), never configured.
 # Another transport's MachineConfig (or the older 99-<role>-pure-storage) is removed in the same run, so a transport
 # switch is one render and one rolling reboot, one node at a time.
 # The rendered config each pool targets before the change: a changed MachineConfig counts as rolled out only once the
 # controller has rendered a new one and the pool has reached it.
+- name: NICs of the storage networks, as the nodes report them
+  ansible.builtin.include_role:
+    name: storage_ifaces
+  when: c.storage.transport == 'iscsi' and c.storage.portworx.iscsi.bind_interfaces
+
 - name: Pools before the change
   kubernetes.core.k8s_info:
     api_version: machineconfiguration.openshift.io/v1
@@ -62,11 +68,11 @@
         overwrite: true
         contents:
           source: "data:text/plain;charset=utf-8;base64,{{ (nvme_module ~ '\n') | b64encode }}"
-    # The record iscsiadm itself would write for `-I <name> --op=new` plus net_ifacename: the iface, bound to the NIC of
-    # the same name, over TCP. Mode 0600, as iscsiadm creates it.
+    # One record per storage NIC: an iface of the NIC's name, bound to that NIC, over TCP (what `iscsiadm -m iface
+    # -I <nic> --op=new` plus net_ifacename would leave). Mode 0600, as iscsiadm creates it.
     storage_mc_iscsi_files: >-
       {%- set files = [] -%}
-      {%- for n in c.storage.portworx.iscsi.allowed_ifaces -%}
+      {%- for n in storage_iscsi_ifaces | default([]) -%}
       {%- set record = 'iface.iscsi_ifacename = ' ~ n ~ '\niface.net_ifacename = ' ~ n ~ '\niface.transport_name = tcp\n' -%}
       {%- set _ = files.append({'path': '/var/lib/iscsi/ifaces/' ~ n, 'mode': 384, 'overwrite': true,
                                 'contents': {'source': 'data:text/plain;charset=utf-8;base64,' ~ (record | b64encode)}}) -%}

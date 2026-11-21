@@ -48,6 +48,32 @@ def nns_ifaces_by_mac(nns):
     return {str(i["mac-address"]).lower(): i["name"] for i in ifaces if i.get("mac-address") and i.get("name")}
 
 
+def storage_network_ifaces(results):
+    """k8s_info results of the storage nodes' NodeNetworkState (a loop over cluster-model nodes: `item` is the node,
+    `resources` its NodeNetworkState) -> the host NIC name of each storage network, in storage-network order.
+
+    The NIC is found by the MAC the cluster model gave the VM's NIC for that network, so nothing is guessed from
+    naming conventions. The names must be the same on every node (one MachineConfig and one StorageCluster serve all
+    of them); if not, the error shows each node's mapping."""
+    per_node = {}
+    for r in results or []:
+        node = r["item"]
+        if not r.get("resources"):
+            raise AnsibleFilterError(f"no NodeNetworkState for {node['name']}")
+        by_mac = nns_ifaces_by_mac(r["resources"][0])
+        per_node[node["name"]] = []
+        for s in node.get("storage") or []:
+            nic = by_mac.get(str(s["mac"]).lower())
+            if not nic:
+                raise AnsibleFilterError(f"no interface with MAC {s['mac']} (storage network {s['name']}) "
+                                         f"on {node['name']}; its interfaces are {sorted(by_mac.values())}")
+            per_node[node["name"]].append((s["name"], nic))
+    mappings = {tuple(v) for v in per_node.values()}
+    if len(mappings) > 1:
+        raise AnsibleFilterError(f"the storage networks sit on different NICs per node: {per_node}")
+    return [nic for _, nic in next(iter(mappings), ())]
+
+
 def nmstate_storage_interfaces(storage, ifaces_by_mac):
     """A node's storage addresses (cluster model nodes[].storage) -> NMState desiredState.interfaces.
 
@@ -80,5 +106,6 @@ class FilterModule:
             "k8s_csinodes_with_driver": k8s_csinodes_with_driver,
             "kv_lines": kv_lines,
             "nns_ifaces_by_mac": nns_ifaces_by_mac,
+            "storage_network_ifaces": storage_network_ifaces,
             "nmstate_storage_interfaces": nmstate_storage_interfaces,
         }

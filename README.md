@@ -203,11 +203,14 @@ Configure the `storage` section (see `cluster.example.yaml`):
   DHCP pool or are used by other hosts. Check the addresses are free first (ARP probe from a node on that VLAN);
 - `storage.flasharray`: management endpoint, realm quota, names (defaults come from the cluster name);
 - `storage.portworx.enabled: true`. Over iSCSI (`san_type: ISCSI`) the StorageCluster always gets
-  `PURE_ISCSI_ALLOWED_CIDRS` from `storage.networks`. Two more settings are opt-in: `iscsi.allowed_ifaces`
-  (`PURE_ISCSI_ALLOWED_IFACES`, the nodes' own NIC names, `ens34` and so on; the `portworx` phase checks they exist on
-  every node) and `iscsi.subnet_aware_login` (`ENABLE_SUBNET_AWARE_ISCSI_LOGIN`, PX-CSI 26.1 or later). PX-CSI also
-  needs each allowed name as an open-iscsi interface record (`iscsiadm -m iface`): the `node` phase writes them into
-  the iSCSI MachineConfig (`/var/lib/iscsi/ifaces/<name>`) and checks them on every node.
+  `PURE_ISCSI_ALLOWED_CIDRS` from `storage.networks`. Two more settings are opt-in: `iscsi.bind_interfaces`
+  (`PURE_ISCSI_ALLOWED_IFACES`: PX-CSI uses only the NICs of the storage networks) and `iscsi.subnet_aware_login`
+  (`ENABLE_SUBNET_AWARE_ISCSI_LOGIN`, PX-CSI 26.1 or later). With `bind_interfaces` no NIC name is configured: once the
+  cluster runs, the `node` and `portworx` phases read from each node's NodeNetworkState which NIC carries each storage
+  network (found by MAC), and they fail if the nodes disagree. PX-CSI needs every one of those NICs as an open-iscsi
+  interface record (`iscsiadm -m iface`): the `node` phase declares them as files in the iSCSI MachineConfig
+  (`/var/lib/iscsi/ifaces/<nic>`), checks them on every node, and the `portworx` phase puts the same names in
+  `PURE_ISCSI_ALLOWED_IFACES`.
 
 Add `vault_flasharray_api_token` to `clusters/vault.yml`.
 

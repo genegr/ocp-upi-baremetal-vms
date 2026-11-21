@@ -1,0 +1,27 @@
+---
+# The host NIC of every storage network, as the running nodes report it: NodeNetworkState, with the NIC found by the
+# MAC the cluster model gave the VM's NIC for that network. For the settings that must name the real interface, so
+# nothing is typed into the config or taken from another platform's naming (eth3, eth4):
+#   storage_node  the open-iscsi interface records in the node MachineConfig (/var/lib/iscsi/ifaces/<nic>)
+#   portworx      PURE_ISCSI_ALLOWED_IFACES
+# Sets storage_iscsi_ifaces (storage-network order) and fails when the nodes disagree, because one MachineConfig and
+# one StorageCluster serve them all. Read-only. Needs the NMState operator (the `network` phase) and the NICs attached.
+- name: Node network state of the storage nodes
+  kubernetes.core.k8s_info:
+    api_version: nmstate.io/v1beta1
+    kind: NodeNetworkState
+    name: "{{ item.hostname }}"
+  register: ifaces_nns
+  until: ifaces_nns.resources | default([]) | length == 1
+  retries: 12
+  delay: 10
+  loop: "{{ storage_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  # A --check before the network phase has no NodeNetworkState CRD yet: the names are then unknown, not an error.
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: NIC of each storage network
+  ansible.builtin.set_fact:
+    storage_iscsi_ifaces: "{{ ifaces_nns.results | storage_network_ifaces }}"
+  when: ifaces_nns is not failed

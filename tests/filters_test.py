@@ -13,7 +13,7 @@ from cluster_model import cluster_model, haproxy_pools  # noqa: E402
 from htpasswd import htpasswd_bindings, htpasswd_render  # noqa: E402
 from k8s import (k8s_condition, k8s_node_readiness, k8s_pending_csrs, k8s_unhealthy_operators,  # noqa: E402
                  k8s_csinodes_with_driver, k8s_names_with_condition, kv_lines, nmstate_storage_interfaces,
-                 nns_ifaces_by_mac)
+                 nns_ifaces_by_mac, storage_network_ifaces)
 
 EXAMPLE = os.path.join(HERE, "..", "cluster.example.yaml")
 failures = []
@@ -153,15 +153,15 @@ check("storage: iSCSI limits Portworx to the storage networks' portals",
       and ci["portworx"]["env"][1]["value"] == ",".join(n["cidr"] for n in ent_iscsi["storage"]["networks"]))
 check("storage: NVMe/TCP env is the SAN type only",
       cs["storage"]["portworx"]["env"] == [{"name": "PURE_FLASHARRAY_SAN_TYPE", "value": "NVMEOF-TCP"}])
-# compact cluster over iSCSI with the interface list and subnet-aware login (PX-CSI mode)
+# compact cluster over iSCSI with the interface binding and subnet-aware login (PX-CSI mode)
 ic = copy.deepcopy(st)
-ic["storage"]["portworx"].update({"san_type": "ISCSI", "iscsi": {"allowed_ifaces": ["ens34", "ens35"], "subnet_aware_login": True}})
+ic["storage"]["portworx"].update({"san_type": "ISCSI", "iscsi": {"bind_interfaces": True, "subnet_aware_login": True}})
 ic["storage"]["networks"] = [{"name": "iscsi-a", "nic": 1, "cidr": "198.51.100.0/24", "host_offset": 100},
                              {"name": "iscsi-b", "nic": 2, "cidr": "203.0.113.0/24", "host_offset": 100}]
 cic = cluster_model(ic, EXAMPLE)
-check("storage: compact iSCSI env = SAN type, interfaces, subnet-aware login, CIDRs (in that order)",
+check("storage: iSCSI env from the model = SAN type, subnet-aware login, CIDRs (the NIC names come from the nodes)",
       [(e["name"], e["value"]) for e in cic["storage"]["portworx"]["env"]]
-      == [("PURE_FLASHARRAY_SAN_TYPE", "ISCSI"), ("PURE_ISCSI_ALLOWED_IFACES", "ens34,ens35"),
+      == [("PURE_FLASHARRAY_SAN_TYPE", "ISCSI"),
           ("ENABLE_SUBNET_AWARE_ISCSI_LOGIN", "true"), ("PURE_ISCSI_ALLOWED_CIDRS", "198.51.100.0/24,203.0.113.0/24")])
 check("storage: a bare host_offset (no `host`) selects offset mode and counts the bootstrap: masters get .101-.103",
       [n["storage"][0]["address"] for n in cic["nodes"] if n["role"] == "master"]
@@ -170,10 +170,10 @@ ic_default = copy.deepcopy(ic); ic_default["storage"]["portworx"]["iscsi"] = {}
 check("storage: the iSCSI options are off by default (CIDRs only)",
       [e["name"] for e in cluster_model(ic_default, EXAMPLE)["storage"]["portworx"]["env"]]
       == ["PURE_FLASHARRAY_SAN_TYPE", "PURE_ISCSI_ALLOWED_CIDRS"])
-bad = copy.deepcopy(ic); bad["storage"]["portworx"]["iscsi"]["allowed_ifaces"] = ["eth 3"]
-rejects("storage: interface names are validated", bad, "allowed_ifaces must be a list")
-bad = copy.deepcopy(ic); bad["storage"]["portworx"]["iscsi"]["allowed_ifaces"] = ["ens34", "ens34"]
-rejects("storage: interface names are distinct", bad, "allowed_ifaces must be a list")
+bad = copy.deepcopy(ic); bad["storage"]["portworx"]["iscsi"]["allowed_ifaces"] = ["ens34", "ens35"]
+rejects("storage: typed-in interface names are gone", bad, "allowed_ifaces is gone")
+bad = copy.deepcopy(ic); bad["storage"]["portworx"]["iscsi"]["bind_interfaces"] = "yes"
+rejects("storage: bind_interfaces is a bool", bad, "bind_interfaces must be true or false")
 bad = copy.deepcopy(ic); bad["storage"]["portworx"]["iscsi"]["subnet_aware_login"] = "yes"
 rejects("storage: subnet_aware_login is a bool", bad, "subnet_aware_login must be true or false")
 bad = copy.deepcopy(ic); bad["storage"]["portworx"]["san_type"] = "NVMEOF-TCP"
@@ -338,6 +338,30 @@ check("nmstate_storage_interfaces: static IPv4 on the NIC found by MAC, no IPv6"
       ifs == [{"name": "ens34", "type": "ethernet", "state": "up", "mtu": 1500,
                "ipv4": {"enabled": True, "dhcp": False, "address": [{"ip": "198.51.100.51", "prefix-length": 24}]},
                "ipv6": {"enabled": False}}])
+# storage_network_ifaces: the NIC of each storage network, found by MAC on every node
+def node_nns(name, ifaces):
+    return {"item": {"name": name, "storage": [{"name": "iscsi-a", "mac": "00:50:56:02:42:51"},
+                                               {"name": "iscsi-b", "mac": "00:50:56:03:42:51"}]},
+            "resources": [{"status": {"currentState": {"interfaces": [
+                {"name": n, "mac-address": m} for n, m in ifaces.items()]}}}]}
+
+
+same = {"ens33": "00:50:56:01:42:51", "ens34": "00:50:56:02:42:51", "ens35": "00:50:56:03:42:51"}
+check("storage_network_ifaces: the NIC of each storage network, in network order",
+      storage_network_ifaces([node_nns("master0", same), node_nns("master1", same)]) == ["ens34", "ens35"])
+swapped = {"ens33": "00:50:56:01:42:51", "ens35": "00:50:56:02:42:51", "ens34": "00:50:56:03:42:51"}
+check("storage_network_ifaces: follows the MAC, not the name's order",
+      storage_network_ifaces([node_nns("master0", swapped)]) == ["ens35", "ens34"])
+for what, results, fragment in (
+        ("nodes that disagree", [node_nns("master0", same), node_nns("master1", swapped)], "different NICs per node"),
+        ("a storage MAC with no NIC", [node_nns("master0", {"ens33": "00:50:56:01:42:51"})], "no interface with MAC"),
+        ("a node with no NodeNetworkState", [{"item": {"name": "master0", "storage": []}, "resources": []}],
+         "no NodeNetworkState")):
+    try:
+        storage_network_ifaces(results)
+        check(f"storage_network_ifaces: {what} rejected", False)
+    except AnsibleFilterError as exc:
+        check(f"storage_network_ifaces: {what} rejected ({fragment})", fragment in str(exc))
 try:
     nmstate_storage_interfaces([m0["storage"][0] | {"mac": "00:50:56:09:09:09"}], by_mac)
     check("nmstate_storage_interfaces: unknown MAC rejected", False)

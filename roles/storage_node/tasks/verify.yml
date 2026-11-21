@@ -132,4 +132,4 @@
     nvme: "{{ c.storage.transport.startswith('nvme') }}"
     iscsi: "{{ c.storage.transport == 'iscsi' }}"
     host_id: "{{ 'iqn' if iscsi else 'hostnqn' }}"
-    px_ifaces: "{{ c.storage.portworx.iscsi.allowed_ifaces }}"
+    px_ifaces: "{{ storage_iscsi_ifaces | default([]) }}"
